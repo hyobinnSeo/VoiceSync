@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClipHive - 영상 다운로더</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <h1>🎬 ClipHive</h1>
+            </div>
+        </header>
+
+        <main>
+            <div class="input-section">
+                <div class="input-wrapper">
+                    <input 
+                        type="url" 
+                        id="urlInput" 
+                        placeholder="YouTube, Instagram, TikTok 링크를 붙여넣기하세요..." 
+                        autocomplete="off"
+                    >
+                </div>
+                <div class="audio-options">
+                    <div class="option-buttons">
+                        <button class="option-btn active" data-option="auto">Auto</button>
+                        <button class="option-btn" data-option="audio">Audio</button>
+                        <button class="option-btn" data-option="mute">Mute</button>
+                    </div>
+                </div>
+                <div class="download-wrapper">
+                    <button id="downloadBtn" class="download-btn">
+                        <span class="btn-text">다운로드</span>
+                        <div class="loading-spinner" style="display: none;"></div>
+                    </button>
+                    <button id="pasteDownloadBtn" class="paste-download-btn">
+                        <span class="btn-text">붙여넣기 + 다운로드</span>
+                        <div class="loading-spinner" style="display: none;"></div>
+                    </button>
+                </div>
+            </div>
+
+            <div id="result" class="result-section" style="display: none;">
+                <div class="video-info">
+                    <div class="video-thumbnail">
+                        <img id="thumbnail" src="" alt="Video thumbnail">
+                    </div>
+                    <div class="video-details">
+                        <h3 id="videoTitle"></h3>
+                        <p id="videoUploader"></p>
+                        <div class="video-meta">
+                            <span id="videoDuration"></span>
+                            <span id="videoQuality"></span>
+                            <span id="fileSize"></span>
+                        </div>
+                        <div class="download-status" id="downloadStatus"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="error" class="error-message" style="display: none;"></div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html> 

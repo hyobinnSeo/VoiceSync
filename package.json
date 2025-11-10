@@ -1,0 +1,29 @@
+{
+  "name": "cliphive",
+  "version": "1.0.0",
+  "description": "Video downloader for Instagram, TikTok, and YouTube",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^2.6.9",
+    "youtube-dl-exec": "^2.4.13"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "video",
+    "downloader",
+    "instagram",
+    "tiktok",
+    "youtube"
+  ],
+  "author": "",
+  "license": "MIT"
+} 
