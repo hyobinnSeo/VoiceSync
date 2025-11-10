@@ -661,15 +661,10 @@ class ClipHive {
             const subtitleItem = document.createElement('div');
             subtitleItem.className = 'original-subtitle-item';
 
-            const timeEl = document.createElement('div');
-            timeEl.className = 'original-subtitle-time';
-            timeEl.textContent = `${item.start ?? '00:00:00'} ~ ${item.end ?? '00:00:00'}`;
-
             const textEl = document.createElement('div');
             textEl.className = 'original-subtitle-text';
             textEl.textContent = item.text || '';
 
-            subtitleItem.appendChild(timeEl);
             subtitleItem.appendChild(textEl);
 
             this.originalSubtitleList.appendChild(subtitleItem);
