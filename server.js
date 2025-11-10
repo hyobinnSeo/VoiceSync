@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -5,14 +7,146 @@ const fs = require('fs');
 const multer = require('multer');
 const youtubeDl = require('youtube-dl-exec');
 const fetch = require('node-fetch');
+const crypto = require('crypto');
+const { pipeline } = require('stream');
+const { promisify } = require('util');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+const streamPipeline = promisify(pipeline);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const GENAI_MODEL_ID = 'gemini-2.5-pro';
+const MAX_VIDEO_SIZE_BYTES = 80 * 1024 * 1024; // 80MB
+const USER_AGENT =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+let cachedGenAi = null;
+let cachedGeminiModel = null;
+
+function ensureGeminiModel() {
+    const apiKey = process.env.GOOGLE_GENAI_API_KEY;
+
+    if (!apiKey) {
+        throw new Error('GOOGLE_GENAI_API_KEY 환경 변수가 설정되어 있지 않습니다.');
+    }
+
+    if (!cachedGenAi) {
+        cachedGenAi = new GoogleGenerativeAI(apiKey);
+    }
+
+    if (!cachedGeminiModel) {
+        cachedGeminiModel = cachedGenAi.getGenerativeModel({
+            model: GENAI_MODEL_ID
+        });
+    }
+
+    return cachedGeminiModel;
+}
+
+function buildTranscriptPrompt() {
+    return [
+        '다음에 제공되는 영상 파일의 음성을 문장 단위로 분석하여 스크립트를 작성하세요.',
+        '각 문장마다 시작 시간과 종료 시간을 모두 포함하고, 시간은 항상 HH:MM:SS 포맷으로 맞춰주세요.',
+        '출력은 JSON 배열 형식으로 반환하며, 각 객체는 start, end, text 키를 가져야 합니다.',
+        '예시: [{"start":"00:00:00","end":"00:00:04","text":"첫 문장"}]',
+        '음성이 없거나 들리지 않으면 빈 배열을 반환하세요.',
+        '자연스러운 한국어로 작성하되, 의미 단위가 명확하도록 문장 단위를 유지하세요.'
+    ].join('\n');
+}
+
+function buildStreamHeaders(remoteUrl, sourceUrl) {
+    const headers = {
+        'User-Agent': USER_AGENT
+    };
+
+    if (
+        (remoteUrl && remoteUrl.includes('instagram.com')) ||
+        (sourceUrl && sourceUrl.includes('instagram.com')) ||
+        (remoteUrl && remoteUrl.includes('cdninstagram.com'))
+    ) {
+        headers['Referer'] = 'https://www.instagram.com/';
+    }
+
+    return headers;
+}
+
+function getMimeTypeFromExt(ext) {
+    switch ((ext || '').toLowerCase()) {
+        case 'mp4':
+            return 'video/mp4';
+        case 'webm':
+            return 'video/webm';
+        case 'mov':
+            return 'video/quicktime';
+        case 'mkv':
+            return 'video/x-matroska';
+        default:
+            return 'video/mp4';
+    }
+}
+
+function getExtensionFromMime(mimeType) {
+    switch ((mimeType || '').toLowerCase()) {
+        case 'video/mp4':
+            return 'mp4';
+        case 'video/webm':
+            return 'webm';
+        case 'video/quicktime':
+            return 'mov';
+        case 'video/x-matroska':
+            return 'mkv';
+        default:
+            return 'mp4';
+    }
+}
+
+async function downloadRemoteVideo(remoteUrl, sourceUrl) {
+    const headers = buildStreamHeaders(remoteUrl, sourceUrl);
+    const response = await fetch(remoteUrl, { headers });
+
+    if (!response.ok) {
+        throw new Error(`원격 영상 다운로드에 실패했습니다. (status: ${response.status})`);
+    }
+
+    if (!response.body) {
+        throw new Error('원격 영상 스트림을 가져올 수 없습니다.');
+    }
+
+    const contentType = response.headers.get('content-type') || 'video/mp4';
+    const contentLengthHeader = response.headers.get('content-length');
+
+    if (contentLengthHeader && Number(contentLengthHeader) > MAX_VIDEO_SIZE_BYTES) {
+        throw new Error('영상 파일이 너무 커서 분석할 수 없습니다. 80MB 이하의 영상을 사용해주세요.');
+    }
+
+    const extension = getExtensionFromMime(contentType);
+    const tempFilename = `remote-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
+    const filePath = path.join(tempDir, tempFilename);
+
+    await streamPipeline(response.body, fs.createWriteStream(filePath));
+
+    const stats = await fs.promises.stat(filePath);
+    if (stats.size > MAX_VIDEO_SIZE_BYTES) {
+        await fs.promises.unlink(filePath).catch(() => {});
+        throw new Error('영상 파일이 너무 커서 분석할 수 없습니다. 80MB 이하의 영상을 사용해주세요.');
+    }
+
+    return {
+        filePath,
+        mimeType: contentType
+    };
+}
 
 // 업로드 디렉토리 설정
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const tempDir = path.join(__dirname, 'temp');
+if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
 }
 
 const storage = multer.diskStorage({
@@ -41,7 +175,7 @@ const upload = multer({
 
 // 미들웨어 설정
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static('public'));
 app.use('/uploads', express.static(uploadsDir));
 
@@ -62,7 +196,7 @@ app.post('/api/upload', (req, res) => {
             return res.status(400).json({ error: '영상 파일을 업로드해주세요.' });
         }
 
-        const { filename, originalname, size } = req.file;
+        const { filename, originalname, size, mimetype } = req.file;
 
         res.json({
             title: path.parse(originalname).name || '내 영상',
@@ -75,7 +209,13 @@ app.post('/api/upload', (req, res) => {
             streamUrl: `/uploads/${encodeURIComponent(filename)}`,
             directUrl: `/uploads/${encodeURIComponent(filename)}`,
             filename,
-            filesize: size
+            filesize: size,
+            sourceType: 'local',
+            transcriptSource: {
+                type: 'local',
+                filename,
+                mimeType: mimetype || 'video/mp4'
+            }
         });
     });
 });
@@ -206,7 +346,15 @@ app.post('/api/download', async (req, res) => {
             streamUrl: `/api/proxy-stream?url=${encodeURIComponent(bestFormat.url)}&filename=${encodeURIComponent(safeFilename)}&source=${encodeURIComponent(url)}`,
             directUrl: bestFormat.url,
             filename: safeFilename,
-            filesize: bestFormat.filesize
+            filesize: bestFormat.filesize,
+            sourceType: 'remote',
+            sourceUrl: url,
+            transcriptSource: {
+                type: 'remote',
+                remoteUrl: bestFormat.url,
+                sourceUrl: url,
+                mimeType: getMimeTypeFromExt(bestFormat.ext)
+            }
         });
 
     } catch (error) {
@@ -224,6 +372,99 @@ app.post('/api/download', async (req, res) => {
         res.status(500).json({ 
             error: '영상 정보를 가져오는데 실패했습니다. 링크를 확인해주세요.' 
         });
+    }
+});
+
+app.post('/api/transcribe', async (req, res) => {
+    let filePath;
+    let shouldCleanup = false;
+
+    try {
+        const { transcriptSource } = req.body || {};
+
+        if (!transcriptSource || !transcriptSource.type) {
+            return res.status(400).json({ error: '스크립트를 생성할 영상 정보가 필요합니다.' });
+        }
+
+        const model = ensureGeminiModel();
+        let mimeType = transcriptSource.mimeType || 'video/mp4';
+
+        if (transcriptSource.type === 'local') {
+            const safeFilename = path.basename(transcriptSource.filename || '');
+            if (!safeFilename) {
+                return res.status(400).json({ error: '로컬 영상 파일명이 필요합니다.' });
+            }
+
+            filePath = path.join(uploadsDir, safeFilename);
+
+            if (!fs.existsSync(filePath)) {
+                return res.status(404).json({ error: '로컬 영상 파일을 찾을 수 없습니다.' });
+            }
+        } else if (transcriptSource.type === 'remote') {
+            if (!transcriptSource.remoteUrl) {
+                return res.status(400).json({ error: '원격 영상 URL이 필요합니다.' });
+            }
+
+            const downloadResult = await downloadRemoteVideo(
+                transcriptSource.remoteUrl,
+                transcriptSource.sourceUrl
+            );
+
+            filePath = downloadResult.filePath;
+            mimeType = downloadResult.mimeType || mimeType;
+            shouldCleanup = true;
+        } else {
+            return res.status(400).json({ error: '지원하지 않는 영상 소스 타입입니다.' });
+        }
+
+        const stats = await fs.promises.stat(filePath);
+
+        if (stats.size > MAX_VIDEO_SIZE_BYTES) {
+            throw new Error('영상 파일이 너무 커서 분석할 수 없습니다. 80MB 이하의 영상을 사용해주세요.');
+        }
+
+        const videoBuffer = await fs.promises.readFile(filePath);
+
+        const result = await model.generateContent([
+            {
+                inlineData: {
+                    data: videoBuffer.toString('base64'),
+                    mimeType
+                }
+            },
+            {
+                text: buildTranscriptPrompt()
+            }
+        ]);
+
+        const response = result.response;
+        const transcriptText = response && typeof response.text === 'function' ? response.text() : null;
+
+        if (!transcriptText) {
+            throw new Error('모델이 스크립트를 생성하지 못했습니다.');
+        }
+
+        res.json({
+            transcript: transcriptText
+        });
+    } catch (error) {
+        console.error('스크립트 생성 오류:', error);
+
+        const message = error?.message || '스크립트 생성 중 오류가 발생했습니다.';
+        const status =
+            message.includes('영상 파일이 너무 커서') ? 413 :
+            message.includes('GOOGLE_GENAI_API_KEY') ? 500 :
+            500;
+
+        res.status(status).json({
+            error: message
+        });
+    } finally {
+        if (shouldCleanup && filePath) {
+            fs.promises.unlink(filePath).catch((unlinkError) => {
+                console.warn('임시 파일 삭제 실패:', unlinkError?.message);
+            });
+        }
     }
 });
 

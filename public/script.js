@@ -16,6 +16,10 @@ class ClipHive {
         this.fileSize = document.getElementById('fileSize');
         this.videoPlayerContainer = document.getElementById('videoPlayerContainer');
         this.videoPlayer = document.getElementById('videoPlayer');
+        this.transcriptSection = document.getElementById('transcriptSection');
+        this.transcriptContent = document.getElementById('transcriptContent');
+        this.transcriptStatus = document.getElementById('transcriptStatus');
+        this.transcriptRequestId = 0;
         
         if (this.videoPlayer) {
             this.videoPlayer.addEventListener('error', () => {
@@ -27,6 +31,7 @@ class ClipHive {
         this.selectedAudioOption = 'auto';
         
         this.init();
+        this.resetTranscript();
     }
 
     init() {
@@ -100,6 +105,7 @@ class ClipHive {
             this.displayVideoInfo(data);
             this.showResult();
 
+            await this.generateTranscript(data.transcriptSource);
             await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
@@ -158,6 +164,7 @@ class ClipHive {
             this.displayVideoInfo(data);
             this.showResult();
 
+            await this.generateTranscript(data.transcriptSource);
             await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
@@ -233,6 +240,148 @@ class ClipHive {
             this.fileSize.textContent = this.formatFileSize(data.filesize);
         } else {
             this.fileSize.textContent = '크기 정보 없음';
+        }
+    }
+
+    resetTranscript() {
+        if (!this.transcriptSection) return;
+
+        this.transcriptSection.style.display = 'none';
+        if (this.transcriptContent) {
+            this.transcriptContent.innerHTML = '';
+        }
+        this.setTranscriptStatus('');
+    }
+
+    setTranscriptStatus(message) {
+        if (!this.transcriptStatus) return;
+
+        if (message) {
+            this.transcriptStatus.textContent = message;
+            this.transcriptStatus.style.display = 'inline';
+        } else {
+            this.transcriptStatus.textContent = '';
+            this.transcriptStatus.style.display = 'none';
+        }
+    }
+
+    renderTranscriptMessage(type, message) {
+        if (!this.transcriptContent) return;
+
+        this.transcriptContent.innerHTML = '';
+        const wrapper = document.createElement('div');
+        wrapper.className = type;
+        wrapper.textContent = message;
+        this.transcriptContent.appendChild(wrapper);
+    }
+
+    renderTranscript(transcriptText) {
+        if (!this.transcriptContent) return;
+
+        if (!transcriptText || !transcriptText.trim()) {
+            this.renderTranscriptMessage('transcript-empty', '생성된 스크립트가 없습니다.');
+            return;
+        }
+
+        let parsed;
+        try {
+            parsed = JSON.parse(transcriptText);
+        } catch (_) {
+            parsed = null;
+        }
+
+        if (Array.isArray(parsed)) {
+            if (parsed.length === 0) {
+                this.renderTranscriptMessage('transcript-empty', '음성이 감지되지 않았습니다.');
+                return;
+            }
+
+            this.transcriptContent.innerHTML = '';
+
+            parsed.forEach((item, index) => {
+                if (!item || typeof item !== 'object') return;
+
+                const transcriptItem = document.createElement('div');
+                transcriptItem.className = 'transcript-item';
+
+                const timeEl = document.createElement('div');
+                timeEl.className = 'transcript-item-time';
+                timeEl.textContent = `${item.start ?? '00:00:00'} ~ ${item.end ?? '00:00:00'}`;
+
+                const textEl = document.createElement('div');
+                textEl.className = 'transcript-item-text';
+                textEl.textContent = item.text || '';
+
+                transcriptItem.appendChild(timeEl);
+                transcriptItem.appendChild(textEl);
+                transcriptItem.dataset.index = String(index);
+
+                this.transcriptContent.appendChild(transcriptItem);
+            });
+
+            return;
+        }
+
+        this.transcriptContent.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'transcript-raw';
+        pre.textContent = transcriptText.trim();
+        this.transcriptContent.appendChild(pre);
+    }
+
+    async generateTranscript(transcriptSource) {
+        if (!this.transcriptSection || !this.transcriptContent) {
+            return false;
+        }
+
+        if (!transcriptSource) {
+            this.resetTranscript();
+            return false;
+        }
+
+        this.transcriptRequestId += 1;
+        const currentRequestId = this.transcriptRequestId;
+
+        this.transcriptSection.style.display = 'block';
+        this.setTranscriptStatus('스크립트를 생성하는 중입니다...');
+        this.renderTranscriptMessage('transcript-empty', '스크립트를 준비하고 있습니다...');
+
+        try {
+            const response = await fetch('/api/transcribe', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ transcriptSource })
+            });
+
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (_) {
+                data = {};
+            }
+
+            if (currentRequestId !== this.transcriptRequestId) {
+                return false;
+            }
+
+            if (!response.ok) {
+                throw new Error(data.error || '스크립트를 생성하는 중 오류가 발생했습니다.');
+            }
+
+            this.renderTranscript(typeof data.transcript === 'string' ? data.transcript : '');
+            this.setTranscriptStatus('생성 완료');
+            return true;
+        } catch (error) {
+            if (currentRequestId !== this.transcriptRequestId) {
+                return false;
+            }
+
+            console.error('스크립트 생성 오류:', error);
+            this.setTranscriptStatus('');
+            this.renderTranscriptMessage('transcript-error', error.message || '스크립트를 생성하지 못했습니다.');
+            return false;
         }
     }
 
@@ -324,6 +473,7 @@ class ClipHive {
     hideResult() {
         this.resultSection.style.display = 'none';
         this.resetVideoPlayer();
+        this.resetTranscript();
     }
 
     showError(message) {

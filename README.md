@@ -147,11 +147,14 @@ ClipHive/
 
 ## ⚙️ 환경 변수
 
-환경 변수는 `.env` 파일에서 설정할 수 있습니다:
+환경 변수는 프로젝트 루트의 `.env` 파일에서 설정할 수 있습니다:
 
 ```env
 PORT=3000
+GOOGLE_GENAI_API_KEY=your_genai_key
 ```
+
+`GOOGLE_GENAI_API_KEY` 값은 Google AI Studio에서 발급한 Gemini API 키를 입력하세요.
 
 ## 🚨 주의사항
 
