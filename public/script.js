@@ -3,27 +3,93 @@ class ClipHive {
         this.urlInput = document.getElementById('urlInput');
         this.downloadBtn = document.getElementById('downloadBtn');
         this.pasteDownloadBtn = document.getElementById('pasteDownloadBtn');
+        this.uploadBtn = document.getElementById('uploadBtn');
+        this.uploadInput = document.getElementById('uploadInput');
         this.resultSection = document.getElementById('result');
         this.errorSection = document.getElementById('error');
         
         // Result elements
-        this.thumbnail = document.getElementById('thumbnail');
         this.videoTitle = document.getElementById('videoTitle');
         this.videoUploader = document.getElementById('videoUploader');
         this.videoDuration = document.getElementById('videoDuration');
         this.videoQuality = document.getElementById('videoQuality');
         this.fileSize = document.getElementById('fileSize');
-        this.downloadStatus = document.getElementById('downloadStatus');
+        this.videoPlayerContainer = document.getElementById('videoPlayerContainer');
+        this.videoPlayer = document.getElementById('videoPlayer');
+        this.originalVideoWrapper = document.getElementById('originalVideoWrapper');
+        this.originalVideoPlayer = document.getElementById('originalVideoPlayer');
+        this.originalSubtitleList = document.getElementById('originalSubtitleList');
+        this.transcriptSection = document.getElementById('transcriptSection');
+        this.transcriptContent = document.getElementById('transcriptContent');
+        this.transcriptStatus = document.getElementById('transcriptStatus');
+        this.transcriptRequestId = 0;
+        this.sourceLanguageSelect = document.getElementById('sourceLanguageSelect');
+        this.targetLanguageSelect = document.getElementById('targetLanguageSelect');
+        this.lastTranscriptSource = null;
+        this.lastTranscriptLanguageOptions = null;
+        this.ttsSegments = [];
+        this.activeTtsIndex = -1;
+        this.isVideoPlaying = false;
+        this.currentTranscriptItems = [];
+        this.ttsSpeakingRate = 1;
+        this.lastVideoTime = 0;
+        this.originalSubtitleEntries = [];
+        this.lastOriginalSubtitleIndex = -1;
         
-        // Audio option
-        this.selectedAudioOption = 'auto';
+        if (this.videoPlayer) {
+            this.videoPlayer.muted = true;
+            this.videoPlayer.defaultMuted = true;
+            this.videoPlayer.addEventListener('error', () => {
+                this.showError('영상 재생 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
+            });
+            this.videoPlayer.addEventListener('timeupdate', () => {
+                this.syncTtsWithVideo();
+            });
+            this.videoPlayer.addEventListener('seeked', () => {
+                this.handleVideoSeeked();
+            });
+            this.videoPlayer.addEventListener('play', () => {
+                this.handleVideoPlay();
+            });
+            this.videoPlayer.addEventListener('pause', () => {
+                this.handleVideoPause();
+            });
+            this.videoPlayer.addEventListener('ended', () => {
+                this.handleVideoEnded();
+            });
+            this.videoPlayer.addEventListener('ratechange', () => {
+                this.syncTtsPlaybackRate();
+            });
+        }
+        
+        if (this.originalVideoPlayer) {
+            this.originalVideoPlayer.addEventListener('timeupdate', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('seeked', () => {
+                this.syncOriginalSubtitles(true);
+            });
+            this.originalVideoPlayer.addEventListener('play', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('pause', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('ended', () => {
+                this.syncOriginalSubtitles();
+            });
+        }
         
         this.init();
+        this.resetTranscript();
     }
 
     init() {
         this.downloadBtn.addEventListener('click', () => this.handleDownload());
         this.pasteDownloadBtn.addEventListener('click', () => this.handlePasteAndDownload());
+        if (this.uploadBtn) {
+            this.uploadBtn.addEventListener('click', () => this.handleUpload());
+        }
         
         this.urlInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
@@ -35,14 +101,81 @@ class ClipHive {
         this.urlInput.addEventListener('input', () => {
             this.hideError();
         });
-        
-        // 오디오 옵션 버튼 이벤트
-        const optionBtns = document.querySelectorAll('.option-btn');
-        optionBtns.forEach(btn => {
-            btn.addEventListener('click', () => {
-                this.handleAudioOption(btn.dataset.option);
+
+        if (this.uploadInput) {
+            this.uploadInput.addEventListener('change', () => {
+                this.hideError();
             });
-        });
+        }
+
+        if (this.sourceLanguageSelect) {
+            this.sourceLanguageSelect.addEventListener('change', () => {
+                this.handleLanguageOptionChange();
+            });
+        }
+
+        if (this.targetLanguageSelect) {
+            this.targetLanguageSelect.addEventListener('change', () => {
+                this.handleLanguageOptionChange();
+            });
+        }
+        
+    }
+
+    async handleUpload() {
+        const file = this.uploadInput?.files?.[0];
+
+        if (!file) {
+            this.showError('업로드할 영상을 선택해주세요.');
+            return;
+        }
+
+        this.setLoading(true, 'upload');
+        this.hideError();
+        this.hideResult();
+
+        const formData = new FormData();
+        formData.append('video', file);
+
+        try {
+            console.log('업로드 요청 시작:', file.name);
+
+            const response = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || '영상 업로드에 실패했습니다.');
+            }
+
+            console.log('업로드 응답:', data);
+
+            if (!data.streamUrl) {
+                throw new Error('재생 가능한 영상 경로를 찾을 수 없습니다.');
+            }
+
+            this.displayVideoInfo(data);
+            this.showResult();
+            this.setOriginalVideoSource(data.directUrl || data.streamUrl || data.fallbackUrl);
+
+            await this.generateTranscript(
+                data.transcriptSource,
+                this.getLanguageOptions()
+            );
+            await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
+
+        } catch (error) {
+            console.error('영상 업로드 오류:', error);
+            this.showError(error.message);
+        } finally {
+            this.setLoading(false, 'upload');
+            if (this.uploadInput) {
+                this.uploadInput.value = '';
+            }
+        }
     }
 
     async handleDownload(buttonType = 'download') {
@@ -61,10 +194,8 @@ class ClipHive {
         this.setLoading(true, buttonType);
         this.hideError();
         this.hideResult();
-        this.setDownloadStatus('영상 정보를 가져오는 중...', 'loading');
-
         try {
-            console.log('다운로드 요청 시작:', url);
+            console.log('스트리밍 요청 시작:', url);
             
             const response = await fetch('/api/download', {
                 method: 'POST',
@@ -72,8 +203,7 @@ class ClipHive {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ 
-                    url, 
-                    audioOption: this.selectedAudioOption 
+                    url 
                 })
             });
 
@@ -85,132 +215,66 @@ class ClipHive {
 
             console.log('서버 응답:', data);
 
-            // 영상 정보 표시
+            if (!data.streamUrl && !data.directUrl) {
+                throw new Error('재생 가능한 스트림을 찾을 수 없습니다.');
+            }
+
             this.displayVideoInfo(data);
             this.showResult();
+            this.setOriginalVideoSource(data.directUrl || data.streamUrl || data.fallbackUrl);
 
-            // 다운로드 시작 - TikTok도 자동 다운로드 시도
-            const isTikTokUrl = url.includes('tiktok.com') || data.isTikTok;
-            console.log('TikTok 체크:', { url, isTikTokUrl, dataIsTikTok: data.isTikTok });
-            
-            if (isTikTokUrl) {
-                this.setDownloadStatus('TikTok 서버 다운로드를 시작합니다...', 'loading');
-                
-                try {
-                    // TikTok 서버 다운로드 자동 시작
-                    await this.startTikTokDownload(data.downloadUrl, data.filename, data.directUrl);
-                } catch (downloadError) {
-                    console.log('TikTok 자동 다운로드 실패, 대안 옵션 제공');
-                    this.setDownloadStatus(`
-                        <div style="text-align: left;">
-                            <p><strong>⚠️ 자동 다운로드 실패 - 수동 옵션:</strong></p>
-                            <div style="margin-top: 12px;">
-                                <button onclick="window.location.href='${data.downloadUrl}'" style="background: #303e5c; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px; font-weight: 600;">다시 시도</button>
-                                <button onclick="window.open('${data.directUrl}', '_blank')" style="background: #6b9bd1; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px;">직접 링크 열기</button>
-                            </div>
-                            <div style="margin-top: 8px;">
-                                <button onclick="navigator.clipboard.writeText('${data.directUrl}').then(() => { this.textContent = '✅ 복사됨!'; setTimeout(() => this.textContent = '📋 링크 복사', 2000); })" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📋 링크 복사</button>
-                            </div>
-                                                         <div style="font-size: 0.85em; margin-top: 12px; padding: 8px; background: rgba(48, 62, 92, 0.1); border-radius: 4px; border-left: 3px solid #303e5c;">
-                                <p style="margin: 0;"><strong>💡 대안 방법:</strong></p>
-                                <p style="margin: 4px 0;">• <strong>다시 시도</strong>: 서버 다운로드 재시도</p>
-                                <p style="margin: 4px 0;">• <strong>직접 링크</strong>: 새 탭에서 우클릭 → "다른 이름으로 저장"</p>
-                            </div>
-                        </div>
-                    `, 'error');
-                }
-            } else {
-                this.setDownloadStatus('다운로드를 시작합니다...', 'loading');
-                await this.startDownload(data.downloadUrl, data.filename, data.directUrl);
-            }
+            await this.generateTranscript(
+                data.transcriptSource,
+                this.getLanguageOptions()
+            );
+            await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
             console.error('영상 정보 가져오기 오류:', error);
             this.showError(error.message);
-            this.setDownloadStatus('영상 정보를 가져오는데 실패했습니다.', 'error');
         } finally {
             this.setLoading(false, buttonType);
         }
     }
 
-    async startDownload(downloadUrl, filename, directUrl = null) {
+    async loadAndPlayVideo(streamUrl, fallbackUrl = null) {
+        const playbackUrl = streamUrl || fallbackUrl;
+
+        if (!playbackUrl) {
+            throw new Error('재생 가능한 영상 URL이 없습니다.');
+        }
+
+        console.log('영상 스트림 로드 시작:', playbackUrl);
+
+        this.videoPlayer.pause();
+        this.videoPlayer.src = playbackUrl;
+        this.videoPlayer.load();
+        this.updateVideoAudioMode();
+        this.syncTtsPlaybackRate();
+        this.videoPlayerContainer.style.display = 'block';
+
         try {
-            console.log('다운로드 시작:', { downloadUrl, filename });
-
-            // 다운로드 링크 생성 및 클릭
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = filename;
-            link.target = '_blank';
-            
-            // 링크를 DOM에 추가하고 클릭 후 제거
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            console.log('다운로드 링크 클릭 완료');
-            this.setDownloadStatus('다운로드가 시작되었습니다! 🎉', 'success');
-            
-            // 5초 후 추가 옵션 제공
-            setTimeout(() => {
-                let statusHtml = '다운로드가 시작되지 않았나요?<br><div style="margin-top: 8px;">';
-                
-                // 프록시 링크 복사 버튼
-                statusHtml += `<button onclick="navigator.clipboard.writeText('${downloadUrl}').then(() => this.textContent = '복사됨!')" style="background: none; border: 1px solid #6b9bd1; color: #6b9bd1; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-right: 8px;">프록시 링크 복사</button>`;
-                
-                // 직접 링크도 있으면 제공
-                if (directUrl) {
-                    statusHtml += `<button onclick="navigator.clipboard.writeText('${directUrl}').then(() => this.textContent = '복사됨!')" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 4px 8px; border-radius: 4px; cursor: pointer;">직접 링크 복사</button>`;
-                }
-                
-                statusHtml += '</div>';
-                
-                this.setDownloadStatus(statusHtml, 'info');
-            }, 5000);
-
+            await this.videoPlayer.play();
+            console.log('영상 재생 시작');
         } catch (error) {
-            console.error('다운로드 시작 오류:', error);
-            this.setDownloadStatus('다운로드 시작에 실패했습니다.', 'error');
-            throw error;
+            console.warn('영상 자동 재생 실패:', error);
+            this.showError('자동 재생에 실패했습니다. 재생 버튼을 눌러주세요.');
         }
     }
 
-    async startTikTokDownload(downloadUrl, filename, directUrl = null) {
-        try {
-            console.log('TikTok 서버 다운로드 시작:', { downloadUrl, filename });
-
-            // YouTube와 동일한 <a> 태그 방식 사용
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = filename;
-            link.target = '_blank';
-            
-            // 링크를 DOM에 추가하고 클릭 후 제거
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            console.log('TikTok 서버 다운로드 링크 클릭 완료');
-            this.setDownloadStatus(`
-                <div style="text-align: center;">
-                    <p><strong>🎉 TikTok 다운로드 시작됨!</strong></p>
-                    <p style="margin: 8px 0; color: #6b9bd1;">H.264 호환 포맷으로 서버에서 다운로드 중...</p>
-                    <div style="margin-top: 12px;">
-                        <button onclick="window.open('${downloadUrl}', '_blank')" style="background: #303e5c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; margin-right: 8px;">다시 시도</button>
-                        <button onclick="navigator.clipboard.writeText('${directUrl}').then(() => { this.textContent = '✅ 복사됨!'; setTimeout(() => this.textContent = '📋 백업 링크 복사', 2000); })" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📋 백업 링크 복사</button>
-                    </div>
-                </div>
-            `, 'success');
-
-        } catch (error) {
-            console.error('TikTok 다운로드 시작 오류:', error);
-            this.setDownloadStatus('TikTok 다운로드 시작에 실패했습니다.', 'error');
-            throw error;
+    resetVideoPlayer() {
+        if (this.videoPlayer) {
+            this.videoPlayer.pause();
+            this.videoPlayer.removeAttribute('src');
+            this.videoPlayer.load();
         }
+        if (this.videoPlayerContainer) {
+            this.videoPlayerContainer.style.display = 'none';
+        }
+        this.setOriginalVideoSource(null);
     }
 
     displayVideoInfo(data) {
-        this.thumbnail.src = data.thumbnail || '';
         this.videoTitle.textContent = data.title || '제목 없음';
         this.videoUploader.textContent = data.uploader || '업로더 정보 없음';
         
@@ -241,6 +305,653 @@ class ClipHive {
             this.fileSize.textContent = this.formatFileSize(data.filesize);
         } else {
             this.fileSize.textContent = '크기 정보 없음';
+        }
+    }
+
+    resetTranscript() {
+        if (!this.transcriptSection) return;
+
+        this.stopAllTtsAudio();
+        this.ttsSegments = [];
+        this.activeTtsIndex = -1;
+        this.isVideoPlaying = false;
+        this.currentTranscriptItems = [];
+        this.ttsSpeakingRate = 1;
+        this.lastVideoTime = 0;
+        this.updateVideoAudioMode();
+        this.transcriptSection.style.display = 'none';
+        if (this.transcriptContent) {
+            this.transcriptContent.innerHTML = '';
+        }
+        this.setTranscriptStatus('');
+        this.renderOriginalSubtitles(null);
+        this.lastTranscriptSource = null;
+        this.lastTranscriptLanguageOptions = null;
+    }
+
+    setTranscriptStatus(message) {
+        if (!this.transcriptStatus) return;
+
+        if (message) {
+            this.transcriptStatus.textContent = message;
+            this.transcriptStatus.style.display = 'inline';
+        } else {
+            this.transcriptStatus.textContent = '';
+            this.transcriptStatus.style.display = 'none';
+        }
+    }
+
+    renderTranscriptMessage(type, message) {
+        if (!this.transcriptContent) return;
+
+        this.transcriptContent.innerHTML = '';
+        const wrapper = document.createElement('div');
+        wrapper.className = type;
+        wrapper.textContent = message;
+        this.transcriptContent.appendChild(wrapper);
+        this.currentTranscriptItems = [];
+        this.renderOriginalSubtitles(null);
+    }
+
+    renderTranscript(transcriptText, parsedItems = null) {
+        if (!this.transcriptContent) return;
+
+        if (!transcriptText || !transcriptText.trim()) {
+            this.renderTranscriptMessage('transcript-empty', '생성된 스크립트가 없습니다.');
+            return;
+        }
+
+        let parsed = Array.isArray(parsedItems) ? parsedItems : null;
+
+        if (!parsed) {
+            try {
+                parsed = JSON.parse(transcriptText);
+            } catch (_) {
+                parsed = null;
+            }
+        }
+
+        if (Array.isArray(parsed)) {
+            if (parsed.length === 0) {
+                this.renderTranscriptMessage('transcript-empty', '음성이 감지되지 않았습니다.');
+                return;
+            }
+
+            this.transcriptContent.innerHTML = '';
+            this.currentTranscriptItems = [];
+
+            parsed.forEach((item, index) => {
+                if (!item || typeof item !== 'object') return;
+
+                const transcriptItem = document.createElement('div');
+                transcriptItem.className = 'transcript-item';
+
+                const timeEl = document.createElement('div');
+                timeEl.className = 'transcript-item-time';
+                timeEl.textContent = `${item.start ?? '00:00:00'} ~ ${item.end ?? '00:00:00'}`;
+
+                const textEl = document.createElement('div');
+                textEl.className = 'transcript-item-text';
+                textEl.textContent = item.text || '';
+
+                transcriptItem.appendChild(timeEl);
+                transcriptItem.appendChild(textEl);
+                transcriptItem.dataset.index = String(index);
+
+                this.transcriptContent.appendChild(transcriptItem);
+                this.currentTranscriptItems.push({
+                    start: item.start ?? '00:00:00',
+                    end: item.end ?? '00:00:00',
+                    text: item.text || ''
+                });
+            });
+
+            this.renderOriginalSubtitles(parsed);
+            return;
+        }
+
+        this.transcriptContent.innerHTML = '';
+        const pre = document.createElement('pre');
+        pre.className = 'transcript-raw';
+        pre.textContent = transcriptText.trim();
+        this.transcriptContent.appendChild(pre);
+        this.currentTranscriptItems = [];
+        this.renderOriginalSubtitles(null);
+    }
+
+    getLanguageOptions() {
+        const sourceValue = this.sourceLanguageSelect?.value ?? 'auto';
+        const targetValue = this.targetLanguageSelect?.value ?? 'ko';
+
+        const allowedSource = ['auto', 'en', 'es', 'ja', 'ko'];
+        const allowedTarget = ['en', 'es', 'ja', 'ko'];
+
+        const sourceLanguage = allowedSource.includes(sourceValue) ? sourceValue : 'auto';
+        const targetLanguage = allowedTarget.includes(targetValue) ? targetValue : 'ko';
+
+        return { sourceLanguage, targetLanguage };
+    }
+
+    async generateTranscript(transcriptSource, languageOptions = this.getLanguageOptions()) {
+        if (!this.transcriptSection || !this.transcriptContent) {
+            return false;
+        }
+
+        if (!transcriptSource) {
+            this.resetTranscript();
+            return false;
+        }
+
+        this.prepareTtsSegments([]);
+        this.transcriptRequestId += 1;
+        const currentRequestId = this.transcriptRequestId;
+        this.lastTranscriptSource = transcriptSource;
+        this.lastTranscriptLanguageOptions = languageOptions;
+
+        this.transcriptSection.style.display = 'block';
+        this.setTranscriptStatus('');
+        this.renderTranscriptMessage('transcript-empty', '스크립트를 생성하는 중입니다...');
+
+        try {
+            const response = await fetch('/api/transcribe', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    transcriptSource,
+                    languageOptions
+                })
+            });
+
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (_) {
+                data = {};
+            }
+
+            if (currentRequestId !== this.transcriptRequestId) {
+                return false;
+            }
+
+            if (!response.ok) {
+                throw new Error(data.error || '스크립트를 생성하는 중 오류가 발생했습니다.');
+            }
+
+            const transcriptText = typeof data.transcript === 'string' ? data.transcript : '';
+            const parsedItems = Array.isArray(data.items) ? data.items : null;
+            const ttsSegments = Array.isArray(data.ttsSegments) ? data.ttsSegments : [];
+
+            if (data.languageOptions) {
+                this.lastTranscriptLanguageOptions = data.languageOptions;
+                if (this.sourceLanguageSelect && data.languageOptions.sourceLanguage) {
+                    this.sourceLanguageSelect.value = data.languageOptions.sourceLanguage;
+                }
+                if (this.targetLanguageSelect && data.languageOptions.targetLanguage) {
+                    this.targetLanguageSelect.value = data.languageOptions.targetLanguage;
+                }
+            }
+
+            if (data.ttsConfig && typeof data.ttsConfig.speakingRate === 'number') {
+                this.ttsSpeakingRate = data.ttsConfig.speakingRate;
+            } else {
+                this.ttsSpeakingRate = 1;
+            }
+
+            if (ttsSegments.length > 0) {
+                this.setTranscriptStatus('TTS를 준비하고 있습니다...');
+            } else {
+                this.renderTranscriptMessage('transcript-empty', '생성된 TTS가 없습니다.');
+            }
+
+            this.prepareTtsSegments(ttsSegments);
+            this.renderTranscript(transcriptText, parsedItems);
+            this.setTranscriptStatus('');
+            this.updateVideoAudioMode();
+            if (this.isVideoPlaying) {
+                this.syncTtsWithVideo();
+            }
+            return true;
+        } catch (error) {
+            if (currentRequestId !== this.transcriptRequestId) {
+                return false;
+            }
+
+            console.error('스크립트 생성 오류:', error);
+            this.setTranscriptStatus('');
+            this.prepareTtsSegments([]);
+            this.updateVideoAudioMode();
+            this.renderTranscriptMessage('transcript-error', error.message || '스크립트를 생성하지 못했습니다.');
+            return false;
+        }
+    }
+
+    prepareTtsSegments(segments = []) {
+        this.stopAllTtsAudio();
+        this.activeTtsIndex = -1;
+
+        if (!Array.isArray(segments) || segments.length === 0) {
+            this.ttsSegments = [];
+            this.updateVideoAudioMode();
+            return;
+        }
+
+        const sanitizedSegments = [];
+
+        segments.forEach((segment) => {
+            if (!segment || typeof segment !== 'object') {
+                return;
+            }
+
+            const text = (segment.text ?? '').toString().trim();
+            const audioContent = segment.audioContent;
+            const providedAudioUrl = segment.audioUrl;
+            if (!text || (!audioContent && !providedAudioUrl)) {
+                return;
+            }
+
+            const startSeconds = this.timeStringToSeconds(
+                segment.start ?? segment.startSeconds
+            );
+            const endSeconds = this.timeStringToSeconds(
+                segment.end ?? segment.endSeconds
+            );
+
+            if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+                return;
+            }
+
+            const safeStart = Math.max(0, startSeconds);
+            const safeEnd = endSeconds > safeStart ? endSeconds : safeStart + 0.4;
+            const mimeType = segment.audioMimeType || 'audio/mp3';
+            const dataUrl = audioContent
+                ? `data:${mimeType};base64,${audioContent}`
+                : providedAudioUrl;
+
+            if (!dataUrl) {
+                return;
+            }
+
+            const audio = new Audio(dataUrl);
+            audio.preload = 'auto';
+
+            sanitizedSegments.push({
+                startSeconds: safeStart,
+                endSeconds: safeEnd,
+                text,
+                audio,
+                audioUrl: dataUrl,
+                mimeType,
+                hasPlayed: false
+            });
+        });
+
+        sanitizedSegments.sort((a, b) => a.startSeconds - b.startSeconds);
+
+        sanitizedSegments.forEach((segment, index) => {
+            segment.audio.addEventListener('ended', () => {
+                if (this.activeTtsIndex === index) {
+                    this.activeTtsIndex = -1;
+                    if (this.isVideoPlaying) {
+                        this.syncTtsWithVideo();
+                    }
+                }
+            });
+        });
+
+        this.ttsSegments = sanitizedSegments;
+        this.activeTtsIndex = -1;
+        this.updateVideoAudioMode();
+        this.syncTtsPlaybackRate();
+    }
+
+    setOriginalVideoSource(url) {
+        if (!this.originalVideoPlayer || !this.originalVideoWrapper) {
+            return;
+        }
+
+        if (!url) {
+            try {
+                this.originalVideoPlayer.pause();
+            } catch (_) {
+                // ignore
+            }
+            this.originalVideoPlayer.removeAttribute('src');
+            this.originalVideoPlayer.load();
+            this.originalVideoWrapper.style.display = 'none';
+            this.renderOriginalSubtitles(null);
+            return;
+        }
+
+        try {
+            this.originalVideoPlayer.pause();
+        } catch (_) {
+            // ignore
+        }
+        this.originalVideoPlayer.src = url;
+        this.originalVideoPlayer.load();
+        this.originalVideoWrapper.style.display = 'flex';
+        this.syncOriginalSubtitles(true);
+    }
+
+    renderOriginalSubtitles(items) {
+        if (!this.originalSubtitleList) {
+            return;
+        }
+
+        this.originalSubtitleList.innerHTML = '';
+
+        if (!Array.isArray(items) || items.length === 0) {
+            this.originalSubtitleList.style.display = 'none';
+            this.originalSubtitleEntries = [];
+            this.lastOriginalSubtitleIndex = -1;
+            return;
+        }
+
+        this.originalSubtitleList.style.display = 'flex';
+        this.originalSubtitleEntries = [];
+        this.lastOriginalSubtitleIndex = -1;
+
+        items.forEach((item) => {
+            if (!item || typeof item !== 'object') {
+                return;
+            }
+
+            const subtitleItem = document.createElement('div');
+            subtitleItem.className = 'original-subtitle-item';
+
+            const timeEl = document.createElement('div');
+            timeEl.className = 'original-subtitle-time';
+            timeEl.textContent = `${item.start ?? '00:00:00'} ~ ${item.end ?? '00:00:00'}`;
+
+            const textEl = document.createElement('div');
+            textEl.className = 'original-subtitle-text';
+            textEl.textContent = item.text || '';
+
+            subtitleItem.appendChild(timeEl);
+            subtitleItem.appendChild(textEl);
+
+            this.originalSubtitleList.appendChild(subtitleItem);
+
+            const startSeconds = this.timeStringToSeconds(item.start ?? 0);
+            const endSecondsRaw = this.timeStringToSeconds(item.end ?? item.start ?? 0);
+            const safeStart = Number.isFinite(startSeconds) ? Math.max(0, startSeconds) : 0;
+            const safeEnd = Number.isFinite(endSecondsRaw) && endSecondsRaw > safeStart
+                ? endSecondsRaw
+                : safeStart + 0.4;
+
+            subtitleItem.style.display = 'none';
+
+            this.originalSubtitleEntries.push({
+                element: subtitleItem,
+                startSeconds: safeStart,
+                endSeconds: safeEnd
+            });
+        });
+
+        this.syncOriginalSubtitles(true);
+    }
+
+    updateVideoAudioMode() {
+        if (!this.videoPlayer) {
+            return;
+        }
+
+        if (this.ttsSegments.length > 0) {
+            this.videoPlayer.muted = true;
+            this.videoPlayer.volume = 0;
+        } else {
+            this.videoPlayer.muted = false;
+            this.videoPlayer.volume = 1;
+        }
+    }
+
+    syncTtsPlaybackRate() {
+        if (!this.videoPlayer || !Array.isArray(this.ttsSegments)) {
+            return;
+        }
+
+        const rate = Number.isFinite(this.videoPlayer.playbackRate)
+            ? this.videoPlayer.playbackRate
+            : 1;
+        const effectiveRate = rate * (this.ttsSpeakingRate || 1);
+
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.playbackRate = effectiveRate;
+            }
+        });
+    }
+
+    syncTtsWithVideo() {
+        if (!this.videoPlayer || !this.ttsSegments.length) {
+            this.stopCurrentTts();
+            this.lastVideoTime = this.videoPlayer?.currentTime ?? this.lastVideoTime;
+            return;
+        }
+
+        const currentTime = Number.isFinite(this.videoPlayer.currentTime)
+            ? this.videoPlayer.currentTime
+            : 0;
+        const tolerance = 0.1;
+
+        const rewound = currentTime + tolerance < this.lastVideoTime;
+        const jumpedForward = currentTime - tolerance > this.lastVideoTime + tolerance;
+
+        if (rewound) {
+            this.ttsSegments.forEach((segment) => {
+                if (segment.startSeconds + tolerance >= currentTime) {
+                    segment.hasPlayed = false;
+                }
+            });
+        } else if (jumpedForward) {
+            this.ttsSegments.forEach((segment) => {
+                if (segment.endSeconds + tolerance < currentTime) {
+                    segment.hasPlayed = true;
+                }
+            });
+        }
+
+        if (!this.isVideoPlaying) {
+            this.pauseCurrentTts();
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        let nextIndex = this.activeTtsIndex;
+
+        if (this.activeTtsIndex === -1) {
+            nextIndex = this.ttsSegments.findIndex((segment) => {
+                if (segment.hasPlayed) {
+                    return false;
+                }
+                const windowStart = segment.startSeconds - tolerance;
+                const windowEnd = segment.endSeconds + tolerance;
+                return currentTime >= windowStart && currentTime < windowEnd;
+            });
+        }
+
+        if (nextIndex === -1) {
+            this.stopCurrentTts();
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        const segment = this.ttsSegments[nextIndex];
+
+        if (!segment?.audio) {
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        if (this.activeTtsIndex !== nextIndex) {
+            this.stopCurrentTts();
+            segment.audio.currentTime = 0;
+            segment.hasPlayed = true;
+            this.activeTtsIndex = nextIndex;
+            segment.audio
+                .play()
+                .catch((error) => {
+                    console.warn('TTS 재생 실패:', error);
+                    segment.hasPlayed = false;
+                    this.activeTtsIndex = -1;
+                });
+        } else if (segment.audio.paused) {
+            segment.audio.play().catch(() => {});
+        }
+
+        this.lastVideoTime = currentTime;
+    }
+
+    syncOriginalSubtitles(forceSeek = false) {
+        if (
+            !this.originalVideoPlayer ||
+            !Array.isArray(this.originalSubtitleEntries) ||
+            this.originalSubtitleEntries.length === 0
+        ) {
+            return;
+        }
+
+        const currentTime = Number.isFinite(this.originalVideoPlayer.currentTime)
+            ? this.originalVideoPlayer.currentTime
+            : 0;
+        const tolerance = 0.12;
+        let activeIndex = -1;
+
+        this.originalSubtitleEntries.forEach((entry, index) => {
+            const isActive =
+                currentTime >= entry.startSeconds - tolerance &&
+                currentTime < entry.endSeconds + tolerance;
+
+            if (isActive) {
+                entry.element.classList.add('active');
+                entry.element.style.display = 'grid';
+                if (activeIndex === -1) {
+                    activeIndex = index;
+                }
+            } else {
+                entry.element.classList.remove('active');
+                entry.element.style.display = 'none';
+            }
+        });
+
+        if (activeIndex === -1 && forceSeek) {
+            const nextIndex = this.originalSubtitleEntries.findIndex(
+                (entry) => entry.startSeconds >= currentTime
+            );
+            if (nextIndex !== -1) {
+                const entry = this.originalSubtitleEntries[nextIndex];
+                entry.element.classList.add('active');
+                entry.element.style.display = 'grid';
+                activeIndex = nextIndex;
+            }
+        }
+
+        if (activeIndex !== -1 && activeIndex !== this.lastOriginalSubtitleIndex) {
+            this.lastOriginalSubtitleIndex = activeIndex;
+            try {
+                this.originalSubtitleEntries[activeIndex].element.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'nearest'
+                });
+            } catch (_) {
+                // ignore
+            }
+        } else if (activeIndex === -1) {
+            this.lastOriginalSubtitleIndex = -1;
+        }
+    }
+
+    pauseCurrentTts() {
+        const segment = this.ttsSegments[this.activeTtsIndex];
+        if (segment?.audio && !segment.audio.paused) {
+            segment.audio.pause();
+        }
+    }
+
+    stopCurrentTts() {
+        const segment = this.ttsSegments[this.activeTtsIndex];
+        if (segment?.audio) {
+            segment.audio.pause();
+            segment.audio.currentTime = 0;
+        }
+        this.activeTtsIndex = -1;
+    }
+
+    stopAllTtsAudio() {
+        if (!Array.isArray(this.ttsSegments)) {
+            return;
+        }
+
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.pause();
+                try {
+                    segment.audio.currentTime = 0;
+                } catch (error) {
+                    // 일부 브라우저에서 currentTime 리셋 중 오류가 발생할 수 있으므로 무시
+                }
+            }
+        });
+        this.activeTtsIndex = -1;
+    }
+
+    handleVideoPlay() {
+        this.isVideoPlaying = true;
+        this.syncTtsPlaybackRate();
+        if (this.ttsSegments.length === 0) {
+            return;
+        }
+        this.syncTtsWithVideo();
+    }
+
+    handleVideoPause() {
+        this.isVideoPlaying = false;
+        this.pauseCurrentTts();
+    }
+
+    handleVideoSeeked() {
+        if (!this.videoPlayer) {
+            return;
+        }
+
+        this.stopCurrentTts();
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.pause();
+                segment.audio.currentTime = 0;
+            }
+        });
+
+        if (this.isVideoPlaying) {
+            this.syncTtsWithVideo();
+        }
+    }
+
+    handleVideoEnded() {
+        this.isVideoPlaying = false;
+        this.stopAllTtsAudio();
+    }
+
+    async handleLanguageOptionChange() {
+        if (!this.lastTranscriptSource) {
+            return;
+        }
+
+        const languageOptions = this.getLanguageOptions();
+        const previous = this.lastTranscriptLanguageOptions;
+
+        const hasChanged =
+            !previous ||
+            previous.sourceLanguage !== languageOptions.sourceLanguage ||
+            previous.targetLanguage !== languageOptions.targetLanguage;
+
+        if (hasChanged) {
+            if (this.videoPlayer && !this.videoPlayer.paused) {
+                this.videoPlayer.pause();
+            }
+            await this.generateTranscript(this.lastTranscriptSource, languageOptions);
         }
     }
 
@@ -282,6 +993,37 @@ class ClipHive {
         }
     }
 
+    timeStringToSeconds(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+
+        if (typeof value !== 'string') {
+            return NaN;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return NaN;
+        }
+
+        if (/^\d+(\.\d+)?$/.test(trimmed)) {
+            return Number.parseFloat(trimmed);
+        }
+
+        const parts = trimmed.split(':').map((part) => Number.parseFloat(part));
+        if (parts.some((part) => Number.isNaN(part))) {
+            return NaN;
+        }
+
+        let seconds = 0;
+        for (let i = 0; i < parts.length; i += 1) {
+            seconds = seconds * 60 + parts[i];
+        }
+
+        return seconds;
+    }
+
     setLoading(isLoading, buttonType = 'download') {
         if (buttonType === 'download') {
             const btnText = this.downloadBtn.querySelector('.btn-text');
@@ -309,13 +1051,20 @@ class ClipHive {
                 btnText.style.display = 'block';
                 loadingSpinner.style.display = 'none';
             }
-        }
-    }
+        } else if (buttonType === 'upload' && this.uploadBtn) {
+            const btnText = this.uploadBtn.querySelector('.btn-text');
+            const loadingSpinner = this.uploadBtn.querySelector('.loading-spinner');
 
-    setDownloadStatus(message, type = 'info') {
-        this.downloadStatus.innerHTML = message;
-        this.downloadStatus.className = `download-status ${type}`;
-        this.downloadStatus.style.display = 'block';
+            this.uploadBtn.disabled = isLoading;
+
+            if (isLoading) {
+                btnText.style.display = 'none';
+                loadingSpinner.style.display = 'block';
+            } else {
+                btnText.style.display = 'block';
+                loadingSpinner.style.display = 'none';
+            }
+        }
     }
 
     showResult() {
@@ -324,9 +1073,8 @@ class ClipHive {
 
     hideResult() {
         this.resultSection.style.display = 'none';
-        if (this.downloadStatus) {
-            this.downloadStatus.style.display = 'none';
-        }
+        this.resetVideoPlayer();
+        this.resetTranscript();
     }
 
     showError(message) {
@@ -362,20 +1110,6 @@ class ClipHive {
         }
     }
 
-    handleAudioOption(option) {
-        // 기존 활성화된 버튼 비활성화
-        document.querySelectorAll('.option-btn').forEach(btn => {
-            btn.classList.remove('active');
-        });
-        
-        // 선택된 버튼 활성화
-        document.querySelector(`[data-option="${option}"]`).classList.add('active');
-        
-        // 선택된 옵션 저장
-        this.selectedAudioOption = option;
-        
-        console.log('오디오 옵션 선택됨:', option);
-    }
 }
 
 // 페이지 로드 후 초기화
