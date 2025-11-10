@@ -3,17 +3,25 @@ class ClipHive {
         this.urlInput = document.getElementById('urlInput');
         this.downloadBtn = document.getElementById('downloadBtn');
         this.pasteDownloadBtn = document.getElementById('pasteDownloadBtn');
+        this.uploadBtn = document.getElementById('uploadBtn');
+        this.uploadInput = document.getElementById('uploadInput');
         this.resultSection = document.getElementById('result');
         this.errorSection = document.getElementById('error');
         
         // Result elements
-        this.thumbnail = document.getElementById('thumbnail');
         this.videoTitle = document.getElementById('videoTitle');
         this.videoUploader = document.getElementById('videoUploader');
         this.videoDuration = document.getElementById('videoDuration');
         this.videoQuality = document.getElementById('videoQuality');
         this.fileSize = document.getElementById('fileSize');
-        this.downloadStatus = document.getElementById('downloadStatus');
+        this.videoPlayerContainer = document.getElementById('videoPlayerContainer');
+        this.videoPlayer = document.getElementById('videoPlayer');
+        
+        if (this.videoPlayer) {
+            this.videoPlayer.addEventListener('error', () => {
+                this.showError('영상 재생 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
+            });
+        }
         
         // Audio option
         this.selectedAudioOption = 'auto';
@@ -24,6 +32,9 @@ class ClipHive {
     init() {
         this.downloadBtn.addEventListener('click', () => this.handleDownload());
         this.pasteDownloadBtn.addEventListener('click', () => this.handlePasteAndDownload());
+        if (this.uploadBtn) {
+            this.uploadBtn.addEventListener('click', () => this.handleUpload());
+        }
         
         this.urlInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
@@ -35,6 +46,12 @@ class ClipHive {
         this.urlInput.addEventListener('input', () => {
             this.hideError();
         });
+
+        if (this.uploadInput) {
+            this.uploadInput.addEventListener('change', () => {
+                this.hideError();
+            });
+        }
         
         // 오디오 옵션 버튼 이벤트
         const optionBtns = document.querySelectorAll('.option-btn');
@@ -43,6 +60,57 @@ class ClipHive {
                 this.handleAudioOption(btn.dataset.option);
             });
         });
+    }
+
+    async handleUpload() {
+        const file = this.uploadInput?.files?.[0];
+
+        if (!file) {
+            this.showError('업로드할 영상을 선택해주세요.');
+            return;
+        }
+
+        this.setLoading(true, 'upload');
+        this.hideError();
+        this.hideResult();
+
+        const formData = new FormData();
+        formData.append('video', file);
+
+        try {
+            console.log('업로드 요청 시작:', file.name);
+
+            const response = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || '영상 업로드에 실패했습니다.');
+            }
+
+            console.log('업로드 응답:', data);
+
+            if (!data.streamUrl) {
+                throw new Error('재생 가능한 영상 경로를 찾을 수 없습니다.');
+            }
+
+            this.displayVideoInfo(data);
+            this.showResult();
+
+            await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
+
+        } catch (error) {
+            console.error('영상 업로드 오류:', error);
+            this.showError(error.message);
+        } finally {
+            this.setLoading(false, 'upload');
+            if (this.uploadInput) {
+                this.uploadInput.value = '';
+            }
+        }
     }
 
     async handleDownload(buttonType = 'download') {
@@ -61,10 +129,8 @@ class ClipHive {
         this.setLoading(true, buttonType);
         this.hideError();
         this.hideResult();
-        this.setDownloadStatus('영상 정보를 가져오는 중...', 'loading');
-
         try {
-            console.log('다운로드 요청 시작:', url);
+            console.log('스트리밍 요청 시작:', url);
             
             const response = await fetch('/api/download', {
                 method: 'POST',
@@ -85,132 +151,58 @@ class ClipHive {
 
             console.log('서버 응답:', data);
 
-            // 영상 정보 표시
+            if (!data.streamUrl && !data.directUrl) {
+                throw new Error('재생 가능한 스트림을 찾을 수 없습니다.');
+            }
+
             this.displayVideoInfo(data);
             this.showResult();
 
-            // 다운로드 시작 - TikTok도 자동 다운로드 시도
-            const isTikTokUrl = url.includes('tiktok.com') || data.isTikTok;
-            console.log('TikTok 체크:', { url, isTikTokUrl, dataIsTikTok: data.isTikTok });
-            
-            if (isTikTokUrl) {
-                this.setDownloadStatus('TikTok 서버 다운로드를 시작합니다...', 'loading');
-                
-                try {
-                    // TikTok 서버 다운로드 자동 시작
-                    await this.startTikTokDownload(data.downloadUrl, data.filename, data.directUrl);
-                } catch (downloadError) {
-                    console.log('TikTok 자동 다운로드 실패, 대안 옵션 제공');
-                    this.setDownloadStatus(`
-                        <div style="text-align: left;">
-                            <p><strong>⚠️ 자동 다운로드 실패 - 수동 옵션:</strong></p>
-                            <div style="margin-top: 12px;">
-                                <button onclick="window.location.href='${data.downloadUrl}'" style="background: #303e5c; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px; font-weight: 600;">다시 시도</button>
-                                <button onclick="window.open('${data.directUrl}', '_blank')" style="background: #6b9bd1; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px;">직접 링크 열기</button>
-                            </div>
-                            <div style="margin-top: 8px;">
-                                <button onclick="navigator.clipboard.writeText('${data.directUrl}').then(() => { this.textContent = '✅ 복사됨!'; setTimeout(() => this.textContent = '📋 링크 복사', 2000); })" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📋 링크 복사</button>
-                            </div>
-                                                         <div style="font-size: 0.85em; margin-top: 12px; padding: 8px; background: rgba(48, 62, 92, 0.1); border-radius: 4px; border-left: 3px solid #303e5c;">
-                                <p style="margin: 0;"><strong>💡 대안 방법:</strong></p>
-                                <p style="margin: 4px 0;">• <strong>다시 시도</strong>: 서버 다운로드 재시도</p>
-                                <p style="margin: 4px 0;">• <strong>직접 링크</strong>: 새 탭에서 우클릭 → "다른 이름으로 저장"</p>
-                            </div>
-                        </div>
-                    `, 'error');
-                }
-            } else {
-                this.setDownloadStatus('다운로드를 시작합니다...', 'loading');
-                await this.startDownload(data.downloadUrl, data.filename, data.directUrl);
-            }
+            await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
             console.error('영상 정보 가져오기 오류:', error);
             this.showError(error.message);
-            this.setDownloadStatus('영상 정보를 가져오는데 실패했습니다.', 'error');
         } finally {
             this.setLoading(false, buttonType);
         }
     }
 
-    async startDownload(downloadUrl, filename, directUrl = null) {
+    async loadAndPlayVideo(streamUrl, fallbackUrl = null) {
+        const playbackUrl = streamUrl || fallbackUrl;
+
+        if (!playbackUrl) {
+            throw new Error('재생 가능한 영상 URL이 없습니다.');
+        }
+
+        console.log('영상 스트림 로드 시작:', playbackUrl);
+
+        this.videoPlayer.pause();
+        this.videoPlayer.src = playbackUrl;
+        this.videoPlayer.load();
+        this.videoPlayerContainer.style.display = 'block';
+
         try {
-            console.log('다운로드 시작:', { downloadUrl, filename });
-
-            // 다운로드 링크 생성 및 클릭
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = filename;
-            link.target = '_blank';
-            
-            // 링크를 DOM에 추가하고 클릭 후 제거
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            console.log('다운로드 링크 클릭 완료');
-            this.setDownloadStatus('다운로드가 시작되었습니다! 🎉', 'success');
-            
-            // 5초 후 추가 옵션 제공
-            setTimeout(() => {
-                let statusHtml = '다운로드가 시작되지 않았나요?<br><div style="margin-top: 8px;">';
-                
-                // 프록시 링크 복사 버튼
-                statusHtml += `<button onclick="navigator.clipboard.writeText('${downloadUrl}').then(() => this.textContent = '복사됨!')" style="background: none; border: 1px solid #6b9bd1; color: #6b9bd1; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-right: 8px;">프록시 링크 복사</button>`;
-                
-                // 직접 링크도 있으면 제공
-                if (directUrl) {
-                    statusHtml += `<button onclick="navigator.clipboard.writeText('${directUrl}').then(() => this.textContent = '복사됨!')" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 4px 8px; border-radius: 4px; cursor: pointer;">직접 링크 복사</button>`;
-                }
-                
-                statusHtml += '</div>';
-                
-                this.setDownloadStatus(statusHtml, 'info');
-            }, 5000);
-
+            await this.videoPlayer.play();
+            console.log('영상 재생 시작');
         } catch (error) {
-            console.error('다운로드 시작 오류:', error);
-            this.setDownloadStatus('다운로드 시작에 실패했습니다.', 'error');
-            throw error;
+            console.warn('영상 자동 재생 실패:', error);
+            this.showError('자동 재생에 실패했습니다. 재생 버튼을 눌러주세요.');
         }
     }
 
-    async startTikTokDownload(downloadUrl, filename, directUrl = null) {
-        try {
-            console.log('TikTok 서버 다운로드 시작:', { downloadUrl, filename });
-
-            // YouTube와 동일한 <a> 태그 방식 사용
-            const link = document.createElement('a');
-            link.href = downloadUrl;
-            link.download = filename;
-            link.target = '_blank';
-            
-            // 링크를 DOM에 추가하고 클릭 후 제거
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            console.log('TikTok 서버 다운로드 링크 클릭 완료');
-            this.setDownloadStatus(`
-                <div style="text-align: center;">
-                    <p><strong>🎉 TikTok 다운로드 시작됨!</strong></p>
-                    <p style="margin: 8px 0; color: #6b9bd1;">H.264 호환 포맷으로 서버에서 다운로드 중...</p>
-                    <div style="margin-top: 12px;">
-                        <button onclick="window.open('${downloadUrl}', '_blank')" style="background: #303e5c; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; margin-right: 8px;">다시 시도</button>
-                        <button onclick="navigator.clipboard.writeText('${directUrl}').then(() => { this.textContent = '✅ 복사됨!'; setTimeout(() => this.textContent = '📋 백업 링크 복사', 2000); })" style="background: none; border: 1px solid #8b9dc3; color: #8b9dc3; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📋 백업 링크 복사</button>
-                    </div>
-                </div>
-            `, 'success');
-
-        } catch (error) {
-            console.error('TikTok 다운로드 시작 오류:', error);
-            this.setDownloadStatus('TikTok 다운로드 시작에 실패했습니다.', 'error');
-            throw error;
+    resetVideoPlayer() {
+        if (this.videoPlayer) {
+            this.videoPlayer.pause();
+            this.videoPlayer.removeAttribute('src');
+            this.videoPlayer.load();
+        }
+        if (this.videoPlayerContainer) {
+            this.videoPlayerContainer.style.display = 'none';
         }
     }
 
     displayVideoInfo(data) {
-        this.thumbnail.src = data.thumbnail || '';
         this.videoTitle.textContent = data.title || '제목 없음';
         this.videoUploader.textContent = data.uploader || '업로더 정보 없음';
         
@@ -309,13 +301,20 @@ class ClipHive {
                 btnText.style.display = 'block';
                 loadingSpinner.style.display = 'none';
             }
-        }
-    }
+        } else if (buttonType === 'upload' && this.uploadBtn) {
+            const btnText = this.uploadBtn.querySelector('.btn-text');
+            const loadingSpinner = this.uploadBtn.querySelector('.loading-spinner');
 
-    setDownloadStatus(message, type = 'info') {
-        this.downloadStatus.innerHTML = message;
-        this.downloadStatus.className = `download-status ${type}`;
-        this.downloadStatus.style.display = 'block';
+            this.uploadBtn.disabled = isLoading;
+
+            if (isLoading) {
+                btnText.style.display = 'none';
+                loadingSpinner.style.display = 'block';
+            } else {
+                btnText.style.display = 'block';
+                loadingSpinner.style.display = 'none';
+            }
+        }
     }
 
     showResult() {
@@ -324,9 +323,7 @@ class ClipHive {
 
     hideResult() {
         this.resultSection.style.display = 'none';
-        if (this.downloadStatus) {
-            this.downloadStatus.style.display = 'none';
-        }
+        this.resetVideoPlayer();
     }
 
     showError(message) {

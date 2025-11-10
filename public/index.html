@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClipHive - 영상 다운로더</title>
+    <title>ClipHive - 영상 플레이어</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
@@ -16,12 +16,28 @@
         </header>
 
         <main>
+            <div id="videoPlayerContainer" class="video-player-container" style="display: none;">
+                <video id="videoPlayer" controls playsinline></video>
+            </div>
+
+            <div id="result" class="result-section" style="display: none;">
+                <div class="video-details">
+                    <h3 id="videoTitle"></h3>
+                    <p id="videoUploader"></p>
+                    <div class="video-meta">
+                        <span id="videoDuration"></span>
+                        <span id="videoQuality"></span>
+                        <span id="fileSize"></span>
+                    </div>
+                </div>
+            </div>
+
             <div class="input-section">
                 <div class="input-wrapper">
                     <input 
                         type="url" 
                         id="urlInput" 
-                        placeholder="YouTube, Instagram, TikTok 링크를 붙여넣기하세요..." 
+                        placeholder="Instagram Reels 링크를 붙여넣기하세요..." 
                         autocomplete="off"
                     >
                 </div>
@@ -34,30 +50,26 @@
                 </div>
                 <div class="download-wrapper">
                     <button id="downloadBtn" class="download-btn">
-                        <span class="btn-text">다운로드</span>
+                        <span class="btn-text">재생</span>
                         <div class="loading-spinner" style="display: none;"></div>
                     </button>
                     <button id="pasteDownloadBtn" class="paste-download-btn">
-                        <span class="btn-text">붙여넣기 + 다운로드</span>
+                        <span class="btn-text">붙여넣기 + 재생</span>
                         <div class="loading-spinner" style="display: none;"></div>
                     </button>
                 </div>
-            </div>
-
-            <div id="result" class="result-section" style="display: none;">
-                <div class="video-info">
-                    <div class="video-thumbnail">
-                        <img id="thumbnail" src="" alt="Video thumbnail">
-                    </div>
-                    <div class="video-details">
-                        <h3 id="videoTitle"></h3>
-                        <p id="videoUploader"></p>
-                        <div class="video-meta">
-                            <span id="videoDuration"></span>
-                            <span id="videoQuality"></span>
-                            <span id="fileSize"></span>
-                        </div>
-                        <div class="download-status" id="downloadStatus"></div>
+                <div class="upload-section">
+                    <label for="uploadInput" class="upload-label">또는 직접 영상 업로드</label>
+                    <div class="upload-controls">
+                        <input 
+                            type="file" 
+                            id="uploadInput" 
+                            accept="video/*"
+                        >
+                        <button id="uploadBtn" class="upload-btn">
+                            <span class="btn-text">업로드</span>
+                            <div class="loading-spinner" style="display: none;"></div>
+                        </button>
                     </div>
                 </div>
             </div>
