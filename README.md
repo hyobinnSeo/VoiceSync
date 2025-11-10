@@ -9,6 +9,7 @@ YouTube, Instagram, TikTok 영상을 최고 화질로 다운로드할 수 있는
 - 🔒 **안전함**: 서버에 파일을 저장하지 않아 개인정보 보호
 - 📱 **반응형 디자인**: 모바일과 데스크톱 모두에서 완벽하게 작동
 - 🎨 **모던한 UI**: cobalt.tools에서 영감을 받은 세련된 다크 테마
+- 🗣️ **Gemini TTS 재생**: 추출된 스크립트를 선택한 언어의 TTS로 재생
 
 ## 🌐 지원 플랫폼
 
@@ -152,9 +153,11 @@ ClipHive/
 ```env
 PORT=3000
 GOOGLE_GENAI_API_KEY=your_genai_key
+GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
 ```
 
 `GOOGLE_GENAI_API_KEY` 값은 Google AI Studio에서 발급한 Gemini API 키를 입력하세요.
+`GOOGLE_APPLICATION_CREDENTIALS`는 Google Cloud Text-to-Speech용 서비스 계정 키(JSON 파일) 경로를 가리켜야 하며, 해당 프로젝트에서 Text-to-Speech API가 활성화되어 있어야 합니다.
 
 ## 🚨 주의사항
 

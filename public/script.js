@@ -16,19 +16,69 @@ class ClipHive {
         this.fileSize = document.getElementById('fileSize');
         this.videoPlayerContainer = document.getElementById('videoPlayerContainer');
         this.videoPlayer = document.getElementById('videoPlayer');
+        this.originalVideoWrapper = document.getElementById('originalVideoWrapper');
+        this.originalVideoPlayer = document.getElementById('originalVideoPlayer');
+        this.originalSubtitleList = document.getElementById('originalSubtitleList');
         this.transcriptSection = document.getElementById('transcriptSection');
         this.transcriptContent = document.getElementById('transcriptContent');
         this.transcriptStatus = document.getElementById('transcriptStatus');
         this.transcriptRequestId = 0;
+        this.sourceLanguageSelect = document.getElementById('sourceLanguageSelect');
+        this.targetLanguageSelect = document.getElementById('targetLanguageSelect');
+        this.lastTranscriptSource = null;
+        this.lastTranscriptLanguageOptions = null;
+        this.ttsSegments = [];
+        this.activeTtsIndex = -1;
+        this.isVideoPlaying = false;
+        this.currentTranscriptItems = [];
+        this.ttsSpeakingRate = 1;
+        this.lastVideoTime = 0;
+        this.originalSubtitleEntries = [];
+        this.lastOriginalSubtitleIndex = -1;
         
         if (this.videoPlayer) {
+            this.videoPlayer.muted = true;
+            this.videoPlayer.defaultMuted = true;
             this.videoPlayer.addEventListener('error', () => {
                 this.showError('영상 재생 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
             });
+            this.videoPlayer.addEventListener('timeupdate', () => {
+                this.syncTtsWithVideo();
+            });
+            this.videoPlayer.addEventListener('seeked', () => {
+                this.handleVideoSeeked();
+            });
+            this.videoPlayer.addEventListener('play', () => {
+                this.handleVideoPlay();
+            });
+            this.videoPlayer.addEventListener('pause', () => {
+                this.handleVideoPause();
+            });
+            this.videoPlayer.addEventListener('ended', () => {
+                this.handleVideoEnded();
+            });
+            this.videoPlayer.addEventListener('ratechange', () => {
+                this.syncTtsPlaybackRate();
+            });
         }
         
-        // Audio option
-        this.selectedAudioOption = 'auto';
+        if (this.originalVideoPlayer) {
+            this.originalVideoPlayer.addEventListener('timeupdate', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('seeked', () => {
+                this.syncOriginalSubtitles(true);
+            });
+            this.originalVideoPlayer.addEventListener('play', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('pause', () => {
+                this.syncOriginalSubtitles();
+            });
+            this.originalVideoPlayer.addEventListener('ended', () => {
+                this.syncOriginalSubtitles();
+            });
+        }
         
         this.init();
         this.resetTranscript();
@@ -57,14 +107,19 @@ class ClipHive {
                 this.hideError();
             });
         }
-        
-        // 오디오 옵션 버튼 이벤트
-        const optionBtns = document.querySelectorAll('.option-btn');
-        optionBtns.forEach(btn => {
-            btn.addEventListener('click', () => {
-                this.handleAudioOption(btn.dataset.option);
+
+        if (this.sourceLanguageSelect) {
+            this.sourceLanguageSelect.addEventListener('change', () => {
+                this.handleLanguageOptionChange();
             });
-        });
+        }
+
+        if (this.targetLanguageSelect) {
+            this.targetLanguageSelect.addEventListener('change', () => {
+                this.handleLanguageOptionChange();
+            });
+        }
+        
     }
 
     async handleUpload() {
@@ -104,8 +159,12 @@ class ClipHive {
 
             this.displayVideoInfo(data);
             this.showResult();
+            this.setOriginalVideoSource(data.directUrl || data.streamUrl || data.fallbackUrl);
 
-            await this.generateTranscript(data.transcriptSource);
+            await this.generateTranscript(
+                data.transcriptSource,
+                this.getLanguageOptions()
+            );
             await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
@@ -144,8 +203,7 @@ class ClipHive {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ 
-                    url, 
-                    audioOption: this.selectedAudioOption 
+                    url 
                 })
             });
 
@@ -163,8 +221,12 @@ class ClipHive {
 
             this.displayVideoInfo(data);
             this.showResult();
+            this.setOriginalVideoSource(data.directUrl || data.streamUrl || data.fallbackUrl);
 
-            await this.generateTranscript(data.transcriptSource);
+            await this.generateTranscript(
+                data.transcriptSource,
+                this.getLanguageOptions()
+            );
             await this.loadAndPlayVideo(data.streamUrl, data.directUrl);
 
         } catch (error) {
@@ -187,6 +249,8 @@ class ClipHive {
         this.videoPlayer.pause();
         this.videoPlayer.src = playbackUrl;
         this.videoPlayer.load();
+        this.updateVideoAudioMode();
+        this.syncTtsPlaybackRate();
         this.videoPlayerContainer.style.display = 'block';
 
         try {
@@ -207,6 +271,7 @@ class ClipHive {
         if (this.videoPlayerContainer) {
             this.videoPlayerContainer.style.display = 'none';
         }
+        this.setOriginalVideoSource(null);
     }
 
     displayVideoInfo(data) {
@@ -246,11 +311,22 @@ class ClipHive {
     resetTranscript() {
         if (!this.transcriptSection) return;
 
+        this.stopAllTtsAudio();
+        this.ttsSegments = [];
+        this.activeTtsIndex = -1;
+        this.isVideoPlaying = false;
+        this.currentTranscriptItems = [];
+        this.ttsSpeakingRate = 1;
+        this.lastVideoTime = 0;
+        this.updateVideoAudioMode();
         this.transcriptSection.style.display = 'none';
         if (this.transcriptContent) {
             this.transcriptContent.innerHTML = '';
         }
         this.setTranscriptStatus('');
+        this.renderOriginalSubtitles(null);
+        this.lastTranscriptSource = null;
+        this.lastTranscriptLanguageOptions = null;
     }
 
     setTranscriptStatus(message) {
@@ -273,9 +349,11 @@ class ClipHive {
         wrapper.className = type;
         wrapper.textContent = message;
         this.transcriptContent.appendChild(wrapper);
+        this.currentTranscriptItems = [];
+        this.renderOriginalSubtitles(null);
     }
 
-    renderTranscript(transcriptText) {
+    renderTranscript(transcriptText, parsedItems = null) {
         if (!this.transcriptContent) return;
 
         if (!transcriptText || !transcriptText.trim()) {
@@ -283,11 +361,14 @@ class ClipHive {
             return;
         }
 
-        let parsed;
-        try {
-            parsed = JSON.parse(transcriptText);
-        } catch (_) {
-            parsed = null;
+        let parsed = Array.isArray(parsedItems) ? parsedItems : null;
+
+        if (!parsed) {
+            try {
+                parsed = JSON.parse(transcriptText);
+            } catch (_) {
+                parsed = null;
+            }
         }
 
         if (Array.isArray(parsed)) {
@@ -297,6 +378,7 @@ class ClipHive {
             }
 
             this.transcriptContent.innerHTML = '';
+            this.currentTranscriptItems = [];
 
             parsed.forEach((item, index) => {
                 if (!item || typeof item !== 'object') return;
@@ -317,8 +399,14 @@ class ClipHive {
                 transcriptItem.dataset.index = String(index);
 
                 this.transcriptContent.appendChild(transcriptItem);
+                this.currentTranscriptItems.push({
+                    start: item.start ?? '00:00:00',
+                    end: item.end ?? '00:00:00',
+                    text: item.text || ''
+                });
             });
 
+            this.renderOriginalSubtitles(parsed);
             return;
         }
 
@@ -327,9 +415,24 @@ class ClipHive {
         pre.className = 'transcript-raw';
         pre.textContent = transcriptText.trim();
         this.transcriptContent.appendChild(pre);
+        this.currentTranscriptItems = [];
+        this.renderOriginalSubtitles(null);
     }
 
-    async generateTranscript(transcriptSource) {
+    getLanguageOptions() {
+        const sourceValue = this.sourceLanguageSelect?.value ?? 'auto';
+        const targetValue = this.targetLanguageSelect?.value ?? 'ko';
+
+        const allowedSource = ['auto', 'en', 'es', 'ja', 'ko'];
+        const allowedTarget = ['en', 'es', 'ja', 'ko'];
+
+        const sourceLanguage = allowedSource.includes(sourceValue) ? sourceValue : 'auto';
+        const targetLanguage = allowedTarget.includes(targetValue) ? targetValue : 'ko';
+
+        return { sourceLanguage, targetLanguage };
+    }
+
+    async generateTranscript(transcriptSource, languageOptions = this.getLanguageOptions()) {
         if (!this.transcriptSection || !this.transcriptContent) {
             return false;
         }
@@ -339,12 +442,15 @@ class ClipHive {
             return false;
         }
 
+        this.prepareTtsSegments([]);
         this.transcriptRequestId += 1;
         const currentRequestId = this.transcriptRequestId;
+        this.lastTranscriptSource = transcriptSource;
+        this.lastTranscriptLanguageOptions = languageOptions;
 
         this.transcriptSection.style.display = 'block';
-        this.setTranscriptStatus('스크립트를 생성하는 중입니다...');
-        this.renderTranscriptMessage('transcript-empty', '스크립트를 준비하고 있습니다...');
+        this.setTranscriptStatus('');
+        this.renderTranscriptMessage('transcript-empty', '스크립트를 생성하는 중입니다...');
 
         try {
             const response = await fetch('/api/transcribe', {
@@ -352,7 +458,10 @@ class ClipHive {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ transcriptSource })
+                body: JSON.stringify({ 
+                    transcriptSource,
+                    languageOptions
+                })
             });
 
             let data = {};
@@ -370,8 +479,39 @@ class ClipHive {
                 throw new Error(data.error || '스크립트를 생성하는 중 오류가 발생했습니다.');
             }
 
-            this.renderTranscript(typeof data.transcript === 'string' ? data.transcript : '');
-            this.setTranscriptStatus('생성 완료');
+            const transcriptText = typeof data.transcript === 'string' ? data.transcript : '';
+            const parsedItems = Array.isArray(data.items) ? data.items : null;
+            const ttsSegments = Array.isArray(data.ttsSegments) ? data.ttsSegments : [];
+
+            if (data.languageOptions) {
+                this.lastTranscriptLanguageOptions = data.languageOptions;
+                if (this.sourceLanguageSelect && data.languageOptions.sourceLanguage) {
+                    this.sourceLanguageSelect.value = data.languageOptions.sourceLanguage;
+                }
+                if (this.targetLanguageSelect && data.languageOptions.targetLanguage) {
+                    this.targetLanguageSelect.value = data.languageOptions.targetLanguage;
+                }
+            }
+
+            if (data.ttsConfig && typeof data.ttsConfig.speakingRate === 'number') {
+                this.ttsSpeakingRate = data.ttsConfig.speakingRate;
+            } else {
+                this.ttsSpeakingRate = 1;
+            }
+
+            if (ttsSegments.length > 0) {
+                this.setTranscriptStatus('TTS를 준비하고 있습니다...');
+            } else {
+                this.renderTranscriptMessage('transcript-empty', '생성된 TTS가 없습니다.');
+            }
+
+            this.prepareTtsSegments(ttsSegments);
+            this.renderTranscript(transcriptText, parsedItems);
+            this.setTranscriptStatus('');
+            this.updateVideoAudioMode();
+            if (this.isVideoPlaying) {
+                this.syncTtsWithVideo();
+            }
             return true;
         } catch (error) {
             if (currentRequestId !== this.transcriptRequestId) {
@@ -380,8 +520,438 @@ class ClipHive {
 
             console.error('스크립트 생성 오류:', error);
             this.setTranscriptStatus('');
+            this.prepareTtsSegments([]);
+            this.updateVideoAudioMode();
             this.renderTranscriptMessage('transcript-error', error.message || '스크립트를 생성하지 못했습니다.');
             return false;
+        }
+    }
+
+    prepareTtsSegments(segments = []) {
+        this.stopAllTtsAudio();
+        this.activeTtsIndex = -1;
+
+        if (!Array.isArray(segments) || segments.length === 0) {
+            this.ttsSegments = [];
+            this.updateVideoAudioMode();
+            return;
+        }
+
+        const sanitizedSegments = [];
+
+        segments.forEach((segment) => {
+            if (!segment || typeof segment !== 'object') {
+                return;
+            }
+
+            const text = (segment.text ?? '').toString().trim();
+            const audioContent = segment.audioContent;
+            const providedAudioUrl = segment.audioUrl;
+            if (!text || (!audioContent && !providedAudioUrl)) {
+                return;
+            }
+
+            const startSeconds = this.timeStringToSeconds(
+                segment.start ?? segment.startSeconds
+            );
+            const endSeconds = this.timeStringToSeconds(
+                segment.end ?? segment.endSeconds
+            );
+
+            if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+                return;
+            }
+
+            const safeStart = Math.max(0, startSeconds);
+            const safeEnd = endSeconds > safeStart ? endSeconds : safeStart + 0.4;
+            const mimeType = segment.audioMimeType || 'audio/mp3';
+            const dataUrl = audioContent
+                ? `data:${mimeType};base64,${audioContent}`
+                : providedAudioUrl;
+
+            if (!dataUrl) {
+                return;
+            }
+
+            const audio = new Audio(dataUrl);
+            audio.preload = 'auto';
+
+            sanitizedSegments.push({
+                startSeconds: safeStart,
+                endSeconds: safeEnd,
+                text,
+                audio,
+                audioUrl: dataUrl,
+                mimeType,
+                hasPlayed: false
+            });
+        });
+
+        sanitizedSegments.sort((a, b) => a.startSeconds - b.startSeconds);
+
+        sanitizedSegments.forEach((segment, index) => {
+            segment.audio.addEventListener('ended', () => {
+                if (this.activeTtsIndex === index) {
+                    this.activeTtsIndex = -1;
+                    if (this.isVideoPlaying) {
+                        this.syncTtsWithVideo();
+                    }
+                }
+            });
+        });
+
+        this.ttsSegments = sanitizedSegments;
+        this.activeTtsIndex = -1;
+        this.updateVideoAudioMode();
+        this.syncTtsPlaybackRate();
+    }
+
+    setOriginalVideoSource(url) {
+        if (!this.originalVideoPlayer || !this.originalVideoWrapper) {
+            return;
+        }
+
+        if (!url) {
+            try {
+                this.originalVideoPlayer.pause();
+            } catch (_) {
+                // ignore
+            }
+            this.originalVideoPlayer.removeAttribute('src');
+            this.originalVideoPlayer.load();
+            this.originalVideoWrapper.style.display = 'none';
+            this.renderOriginalSubtitles(null);
+            return;
+        }
+
+        try {
+            this.originalVideoPlayer.pause();
+        } catch (_) {
+            // ignore
+        }
+        this.originalVideoPlayer.src = url;
+        this.originalVideoPlayer.load();
+        this.originalVideoWrapper.style.display = 'flex';
+        this.syncOriginalSubtitles(true);
+    }
+
+    renderOriginalSubtitles(items) {
+        if (!this.originalSubtitleList) {
+            return;
+        }
+
+        this.originalSubtitleList.innerHTML = '';
+
+        if (!Array.isArray(items) || items.length === 0) {
+            this.originalSubtitleList.style.display = 'none';
+            this.originalSubtitleEntries = [];
+            this.lastOriginalSubtitleIndex = -1;
+            return;
+        }
+
+        this.originalSubtitleList.style.display = 'flex';
+        this.originalSubtitleEntries = [];
+        this.lastOriginalSubtitleIndex = -1;
+
+        items.forEach((item) => {
+            if (!item || typeof item !== 'object') {
+                return;
+            }
+
+            const subtitleItem = document.createElement('div');
+            subtitleItem.className = 'original-subtitle-item';
+
+            const timeEl = document.createElement('div');
+            timeEl.className = 'original-subtitle-time';
+            timeEl.textContent = `${item.start ?? '00:00:00'} ~ ${item.end ?? '00:00:00'}`;
+
+            const textEl = document.createElement('div');
+            textEl.className = 'original-subtitle-text';
+            textEl.textContent = item.text || '';
+
+            subtitleItem.appendChild(timeEl);
+            subtitleItem.appendChild(textEl);
+
+            this.originalSubtitleList.appendChild(subtitleItem);
+
+            const startSeconds = this.timeStringToSeconds(item.start ?? 0);
+            const endSecondsRaw = this.timeStringToSeconds(item.end ?? item.start ?? 0);
+            const safeStart = Number.isFinite(startSeconds) ? Math.max(0, startSeconds) : 0;
+            const safeEnd = Number.isFinite(endSecondsRaw) && endSecondsRaw > safeStart
+                ? endSecondsRaw
+                : safeStart + 0.4;
+
+            subtitleItem.style.display = 'none';
+
+            this.originalSubtitleEntries.push({
+                element: subtitleItem,
+                startSeconds: safeStart,
+                endSeconds: safeEnd
+            });
+        });
+
+        this.syncOriginalSubtitles(true);
+    }
+
+    updateVideoAudioMode() {
+        if (!this.videoPlayer) {
+            return;
+        }
+
+        if (this.ttsSegments.length > 0) {
+            this.videoPlayer.muted = true;
+            this.videoPlayer.volume = 0;
+        } else {
+            this.videoPlayer.muted = false;
+            this.videoPlayer.volume = 1;
+        }
+    }
+
+    syncTtsPlaybackRate() {
+        if (!this.videoPlayer || !Array.isArray(this.ttsSegments)) {
+            return;
+        }
+
+        const rate = Number.isFinite(this.videoPlayer.playbackRate)
+            ? this.videoPlayer.playbackRate
+            : 1;
+        const effectiveRate = rate * (this.ttsSpeakingRate || 1);
+
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.playbackRate = effectiveRate;
+            }
+        });
+    }
+
+    syncTtsWithVideo() {
+        if (!this.videoPlayer || !this.ttsSegments.length) {
+            this.stopCurrentTts();
+            this.lastVideoTime = this.videoPlayer?.currentTime ?? this.lastVideoTime;
+            return;
+        }
+
+        const currentTime = Number.isFinite(this.videoPlayer.currentTime)
+            ? this.videoPlayer.currentTime
+            : 0;
+        const tolerance = 0.1;
+
+        const rewound = currentTime + tolerance < this.lastVideoTime;
+        const jumpedForward = currentTime - tolerance > this.lastVideoTime + tolerance;
+
+        if (rewound) {
+            this.ttsSegments.forEach((segment) => {
+                if (segment.startSeconds + tolerance >= currentTime) {
+                    segment.hasPlayed = false;
+                }
+            });
+        } else if (jumpedForward) {
+            this.ttsSegments.forEach((segment) => {
+                if (segment.endSeconds + tolerance < currentTime) {
+                    segment.hasPlayed = true;
+                }
+            });
+        }
+
+        if (!this.isVideoPlaying) {
+            this.pauseCurrentTts();
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        let nextIndex = this.activeTtsIndex;
+
+        if (this.activeTtsIndex === -1) {
+            nextIndex = this.ttsSegments.findIndex((segment) => {
+                if (segment.hasPlayed) {
+                    return false;
+                }
+                const windowStart = segment.startSeconds - tolerance;
+                const windowEnd = segment.endSeconds + tolerance;
+                return currentTime >= windowStart && currentTime < windowEnd;
+            });
+        }
+
+        if (nextIndex === -1) {
+            this.stopCurrentTts();
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        const segment = this.ttsSegments[nextIndex];
+
+        if (!segment?.audio) {
+            this.lastVideoTime = currentTime;
+            return;
+        }
+
+        if (this.activeTtsIndex !== nextIndex) {
+            this.stopCurrentTts();
+            segment.audio.currentTime = 0;
+            segment.hasPlayed = true;
+            this.activeTtsIndex = nextIndex;
+            segment.audio
+                .play()
+                .catch((error) => {
+                    console.warn('TTS 재생 실패:', error);
+                    segment.hasPlayed = false;
+                    this.activeTtsIndex = -1;
+                });
+        } else if (segment.audio.paused) {
+            segment.audio.play().catch(() => {});
+        }
+
+        this.lastVideoTime = currentTime;
+    }
+
+    syncOriginalSubtitles(forceSeek = false) {
+        if (
+            !this.originalVideoPlayer ||
+            !Array.isArray(this.originalSubtitleEntries) ||
+            this.originalSubtitleEntries.length === 0
+        ) {
+            return;
+        }
+
+        const currentTime = Number.isFinite(this.originalVideoPlayer.currentTime)
+            ? this.originalVideoPlayer.currentTime
+            : 0;
+        const tolerance = 0.12;
+        let activeIndex = -1;
+
+        this.originalSubtitleEntries.forEach((entry, index) => {
+            const isActive =
+                currentTime >= entry.startSeconds - tolerance &&
+                currentTime < entry.endSeconds + tolerance;
+
+            if (isActive) {
+                entry.element.classList.add('active');
+                entry.element.style.display = 'grid';
+                if (activeIndex === -1) {
+                    activeIndex = index;
+                }
+            } else {
+                entry.element.classList.remove('active');
+                entry.element.style.display = 'none';
+            }
+        });
+
+        if (activeIndex === -1 && forceSeek) {
+            const nextIndex = this.originalSubtitleEntries.findIndex(
+                (entry) => entry.startSeconds >= currentTime
+            );
+            if (nextIndex !== -1) {
+                const entry = this.originalSubtitleEntries[nextIndex];
+                entry.element.classList.add('active');
+                entry.element.style.display = 'grid';
+                activeIndex = nextIndex;
+            }
+        }
+
+        if (activeIndex !== -1 && activeIndex !== this.lastOriginalSubtitleIndex) {
+            this.lastOriginalSubtitleIndex = activeIndex;
+            try {
+                this.originalSubtitleEntries[activeIndex].element.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'nearest'
+                });
+            } catch (_) {
+                // ignore
+            }
+        } else if (activeIndex === -1) {
+            this.lastOriginalSubtitleIndex = -1;
+        }
+    }
+
+    pauseCurrentTts() {
+        const segment = this.ttsSegments[this.activeTtsIndex];
+        if (segment?.audio && !segment.audio.paused) {
+            segment.audio.pause();
+        }
+    }
+
+    stopCurrentTts() {
+        const segment = this.ttsSegments[this.activeTtsIndex];
+        if (segment?.audio) {
+            segment.audio.pause();
+            segment.audio.currentTime = 0;
+        }
+        this.activeTtsIndex = -1;
+    }
+
+    stopAllTtsAudio() {
+        if (!Array.isArray(this.ttsSegments)) {
+            return;
+        }
+
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.pause();
+                try {
+                    segment.audio.currentTime = 0;
+                } catch (error) {
+                    // 일부 브라우저에서 currentTime 리셋 중 오류가 발생할 수 있으므로 무시
+                }
+            }
+        });
+        this.activeTtsIndex = -1;
+    }
+
+    handleVideoPlay() {
+        this.isVideoPlaying = true;
+        this.syncTtsPlaybackRate();
+        if (this.ttsSegments.length === 0) {
+            return;
+        }
+        this.syncTtsWithVideo();
+    }
+
+    handleVideoPause() {
+        this.isVideoPlaying = false;
+        this.pauseCurrentTts();
+    }
+
+    handleVideoSeeked() {
+        if (!this.videoPlayer) {
+            return;
+        }
+
+        this.stopCurrentTts();
+        this.ttsSegments.forEach((segment) => {
+            if (segment?.audio) {
+                segment.audio.pause();
+                segment.audio.currentTime = 0;
+            }
+        });
+
+        if (this.isVideoPlaying) {
+            this.syncTtsWithVideo();
+        }
+    }
+
+    handleVideoEnded() {
+        this.isVideoPlaying = false;
+        this.stopAllTtsAudio();
+    }
+
+    async handleLanguageOptionChange() {
+        if (!this.lastTranscriptSource) {
+            return;
+        }
+
+        const languageOptions = this.getLanguageOptions();
+        const previous = this.lastTranscriptLanguageOptions;
+
+        const hasChanged =
+            !previous ||
+            previous.sourceLanguage !== languageOptions.sourceLanguage ||
+            previous.targetLanguage !== languageOptions.targetLanguage;
+
+        if (hasChanged) {
+            if (this.videoPlayer && !this.videoPlayer.paused) {
+                this.videoPlayer.pause();
+            }
+            await this.generateTranscript(this.lastTranscriptSource, languageOptions);
         }
     }
 
@@ -421,6 +991,37 @@ class ClipHive {
         } catch (_) {
             return false;
         }
+    }
+
+    timeStringToSeconds(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+
+        if (typeof value !== 'string') {
+            return NaN;
+        }
+
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return NaN;
+        }
+
+        if (/^\d+(\.\d+)?$/.test(trimmed)) {
+            return Number.parseFloat(trimmed);
+        }
+
+        const parts = trimmed.split(':').map((part) => Number.parseFloat(part));
+        if (parts.some((part) => Number.isNaN(part))) {
+            return NaN;
+        }
+
+        let seconds = 0;
+        for (let i = 0; i < parts.length; i += 1) {
+            seconds = seconds * 60 + parts[i];
+        }
+
+        return seconds;
     }
 
     setLoading(isLoading, buttonType = 'download') {
@@ -509,20 +1110,6 @@ class ClipHive {
         }
     }
 
-    handleAudioOption(option) {
-        // 기존 활성화된 버튼 비활성화
-        document.querySelectorAll('.option-btn').forEach(btn => {
-            btn.classList.remove('active');
-        });
-        
-        // 선택된 버튼 활성화
-        document.querySelector(`[data-option="${option}"]`).classList.add('active');
-        
-        // 선택된 옵션 저장
-        this.selectedAudioOption = option;
-        
-        console.log('오디오 옵션 선택됨:', option);
-    }
 }
 
 // 페이지 로드 후 초기화

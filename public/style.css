@@ -137,47 +137,6 @@ main {
     100% { transform: rotate(360deg); }
 }
 
-/* Audio Options */
-.audio-options {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-top: 0.5rem;
-}
-
-.option-buttons {
-    display: flex;
-    gap: 0.5rem;
-}
-
-.option-btn {
-    padding: 0.5rem 1rem;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 20px;
-    color: var(--text-secondary);
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.3s ease;
-}
-
-.option-btn:hover {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-}
-
-.option-btn.active {
-    background: var(--success);
-    border-color: var(--success);
-    color: white;
-}
-
-.option-btn.active:hover {
-    background: #5a8fc0;
-    border-color: #5a8fc0;
-}
-
 /* Download Wrapper */
 .download-wrapper {
     display: flex;
@@ -283,6 +242,47 @@ main {
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
+}
+
+.transcription-options {
+    margin-top: 1.5rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem;
+    background: rgba(0, 0, 0, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--border-radius);
+    padding: 1.25rem;
+}
+
+.option-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.option-group label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.option-group select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 0.75rem 1rem;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.option-group select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1);
 }
 
 /* Result Section */
@@ -445,6 +445,70 @@ main {
     background: #000;
 }
 
+.original-video-wrapper {
+    margin-top: 1.5rem;
+    display: none;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.original-video-header h4 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 0;
+    color: var(--text-primary);
+}
+
+.original-video-wrapper video {
+    width: 100%;
+    border-radius: calc(var(--border-radius) - 4px);
+    outline: none;
+    background: #000;
+    border: 1px solid var(--border-color);
+    padding: 0.5rem;
+}
+
+.original-subtitle-list {
+    display: none;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.original-subtitle-item {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+    align-items: baseline;
+    padding: 0.5rem 0.75rem;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: var(--border-radius);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.original-subtitle-time {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--accent-secondary);
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+}
+
+.original-subtitle-text {
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+.original-subtitle-item.active {
+    background: rgba(105, 227, 255, 0.25);
+    border-color: rgba(105, 227, 255, 0.45);
+}
+
 /* Error Message */
 .error-message {
     background: linear-gradient(135deg, rgba(255, 107, 107, 0.1), rgba(255, 82, 82, 0.1));
@@ -477,20 +541,6 @@ main {
         min-width: unset;
     }
     
-    .audio-options {
-        justify-content: center;
-    }
-    
-    .option-buttons {
-        width: 100%;
-        justify-content: center;
-    }
-    
-    .option-btn {
-        flex: 1;
-        text-align: center;
-    }
-    
     .video-meta {
         justify-content: center;
     }
@@ -511,5 +561,9 @@ main {
 
     .transcript-item {
         padding: 0.75rem 0.85rem;
+    }
+
+    .transcription-options {
+        grid-template-columns: 1fr;
     }
 } 

@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { pipeline } = require('stream');
 const { promisify } = require('util');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const textToSpeech = require('@google-cloud/text-to-speech');
 
 const streamPipeline = promisify(pipeline);
 
@@ -20,9 +21,42 @@ const GENAI_MODEL_ID = 'gemini-2.5-pro';
 const MAX_VIDEO_SIZE_BYTES = 80 * 1024 * 1024; // 80MB
 const USER_AGENT =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const SOURCE_LANGUAGE_CODES = ['auto', 'en', 'es', 'ja', 'ko'];
+const TARGET_LANGUAGE_CODES = ['en', 'es', 'ja', 'ko'];
+const LANGUAGE_LABELS = {
+    auto: '자동 감지',
+    en: '영어',
+    es: '스페인어',
+    ja: '일본어',
+    ko: '한국어'
+};
+const MAX_TTS_SEGMENTS = 200;
+const MAX_TTS_TEXT_LENGTH = 500;
+const TTS_SPEAKING_RATE = 1.3;
+const DEFAULT_TTS_LANGUAGE = 'ko';
+const TTS_VOICE_MAP = {
+    en: {
+        languageCode: 'en-US',
+        name: 'en-US-Neural2-F'
+    },
+    es: {
+        languageCode: 'es-ES',
+        name: 'es-ES-Neural2-B'
+    },
+    ja: {
+        languageCode: 'ja-JP',
+        name: 'ja-JP-Neural2-C'
+    },
+    ko: {
+        languageCode: 'ko-KR',
+        name: 'ko-KR-Neural2-A'
+    }
+};
 
 let cachedGenAi = null;
 let cachedGeminiModel = null;
+let cachedTextToSpeechClient = null;
+let warnedMissingTtsCredentials = false;
 
 function ensureGeminiModel() {
     const apiKey = process.env.GOOGLE_GENAI_API_KEY;
@@ -44,15 +78,287 @@ function ensureGeminiModel() {
     return cachedGeminiModel;
 }
 
-function buildTranscriptPrompt() {
+function ensureTextToSpeechClient() {
+    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && !warnedMissingTtsCredentials) {
+        warnedMissingTtsCredentials = true;
+        console.warn(
+            '[TTS] GOOGLE_APPLICATION_CREDENTIALS 환경 변수가 설정되어 있지 않습니다. ' +
+            '서비스 계정 키 파일 경로를 설정하지 않으면 TTS 요청이 실패할 수 있습니다.'
+        );
+    }
+
+    if (!cachedTextToSpeechClient) {
+        cachedTextToSpeechClient = new textToSpeech.TextToSpeechClient();
+    }
+
+    return cachedTextToSpeechClient;
+}
+
+function normalizeLanguageOptions(rawOptions = {}) {
+    const sourceCandidate =
+        typeof rawOptions?.sourceLanguage === 'string'
+            ? rawOptions.sourceLanguage.toLowerCase()
+            : 'auto';
+    const targetCandidate =
+        typeof rawOptions?.targetLanguage === 'string'
+            ? rawOptions.targetLanguage.toLowerCase()
+            : 'ko';
+
+    const sourceLanguage = SOURCE_LANGUAGE_CODES.includes(sourceCandidate)
+        ? sourceCandidate
+        : 'auto';
+    const targetLanguage = TARGET_LANGUAGE_CODES.includes(targetCandidate)
+        ? targetCandidate
+        : 'ko';
+
+    return { sourceLanguage, targetLanguage };
+}
+
+function parseTimecodeToSeconds(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+    }
+
+    if (typeof value !== 'string') {
+        return NaN;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return NaN;
+    }
+
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+        return Number.parseFloat(trimmed);
+    }
+
+    const parts = trimmed.split(':').map((part) => Number.parseFloat(part));
+    if (parts.some((part) => Number.isNaN(part))) {
+        return NaN;
+    }
+
+    let seconds = 0;
+    for (let i = 0; i < parts.length; i += 1) {
+        seconds = seconds * 60 + parts[i];
+    }
+
+    return seconds;
+}
+
+function formatSecondsToTimecode(seconds) {
+    const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+    const totalSeconds = Math.floor(safeSeconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+
+    return [
+        hours.toString().padStart(2, '0'),
+        minutes.toString().padStart(2, '0'),
+        secs.toString().padStart(2, '0')
+    ].join(':');
+}
+
+function normalizeTranscriptItems(items = []) {
+    if (!Array.isArray(items)) {
+        return [];
+    }
+
+    const normalized = [];
+
+    items.forEach((item) => {
+        if (!item || typeof item !== 'object') {
+            return;
+        }
+
+        const text = (item.text ?? '').toString().trim();
+        if (!text) {
+            return;
+        }
+
+        const startSeconds = parseTimecodeToSeconds(
+            item.start ?? item.startSeconds ?? item.begin ?? item.start_time
+        );
+        const endSeconds = parseTimecodeToSeconds(
+            item.end ?? item.endSeconds ?? item.finish ?? item.end_time
+        );
+
+        if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+            return;
+        }
+
+        const safeStart = Math.max(0, startSeconds);
+        const safeEnd = endSeconds > safeStart ? endSeconds : safeStart + 0.4;
+
+        normalized.push({
+            start: formatSecondsToTimecode(safeStart),
+            end: formatSecondsToTimecode(safeEnd),
+            startSeconds: safeStart,
+            endSeconds: safeEnd,
+            text
+        });
+    });
+
+    normalized.sort((a, b) => a.startSeconds - b.startSeconds);
+
+    return normalized;
+}
+
+function extractJsonArrayFromText(rawText) {
+    if (!rawText || typeof rawText !== 'string') {
+        return rawText;
+    }
+
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+        return trimmed;
+    }
+
+    // 코드 블록(```json ... ```) 제거
+    const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fencedMatch && fencedMatch[1]) {
+        return fencedMatch[1].trim();
+    }
+
+    // HTML 프리태그 제거
+    const preMatch = trimmed.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+    if (preMatch && preMatch[1]) {
+        return preMatch[1].trim();
+    }
+
+    // JSON 배열만 남기기
+    const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+        return arrayMatch[0].trim();
+    }
+
+    return trimmed;
+}
+
+function buildTranscriptPrompt(options = {}) {
+    const { sourceLanguage, targetLanguage } = normalizeLanguageOptions(options);
+
+    const sourceInstruction =
+        sourceLanguage === 'auto'
+            ? '원본 음성 언어를 자동으로 감지하세요. 감지가 불확실하면 그 사실을 언급하세요.'
+            : `원본 음성은 ${LANGUAGE_LABELS[sourceLanguage]}입니다. 해당 언어를 기준으로 음성을 이해하세요.`;
+
+    const targetInstruction =
+        sourceLanguage === targetLanguage
+            ? `출력 문장은 ${LANGUAGE_LABELS[targetLanguage]} 원문 언어 그대로 자연스럽게 작성하세요.`
+            : `출력 문장은 ${LANGUAGE_LABELS[targetLanguage]}로 자연스럽게 번역하여 작성하세요.`;
+
+    const writingNote =
+        targetLanguage === 'ko'
+            ? '자연스러운 한국어 문장부호와 어순을 사용하세요.'
+            : `문장부호와 어휘는 ${LANGUAGE_LABELS[targetLanguage]}에 맞게 자연스럽게 구성하세요.`;
+
+    const translationNote =
+        sourceLanguage === targetLanguage
+            ? '원본 언어를 그대로 사용하되, 문장을 명확하고 자연스럽게 다듬으세요.'
+            : `${LANGUAGE_LABELS[targetLanguage]} 독자가 이해하기 쉽게 완전한 번역을 제공하세요. 번역 누락 없이 원문의 의미를 모두 포함시키고, 대상 언어 특유의 자연스러운 표현을 사용하세요.`;
+
     return [
         '다음에 제공되는 영상 파일의 음성을 문장 단위로 분석하여 스크립트를 작성하세요.',
+        sourceInstruction,
+        targetInstruction,
+        translationNote,
         '각 문장마다 시작 시간과 종료 시간을 모두 포함하고, 시간은 항상 HH:MM:SS 포맷으로 맞춰주세요.',
         '출력은 JSON 배열 형식으로 반환하며, 각 객체는 start, end, text 키를 가져야 합니다.',
         '예시: [{"start":"00:00:00","end":"00:00:04","text":"첫 문장"}]',
         '음성이 없거나 들리지 않으면 빈 배열을 반환하세요.',
-        '자연스러운 한국어로 작성하되, 의미 단위가 명확하도록 문장 단위를 유지하세요.'
+        writingNote,
+        '의미 단위를 명확히 구분하고, 불필요한 설명은 포함하지 마세요.',
+        '반드시 JSON 배열만 출력하고, 코드 블록(```)이나 추가 설명, 주석을 포함하지 마세요.',
+        'JSON 이외의 텍스트가 섞이지 않도록 주의하세요.',
+        'text 값에는 지정된 출력 언어만 사용하고, 다른 언어가 섞이지 않도록 주의하세요.'
     ].join('\n');
+}
+
+async function synthesizeTtsSegments(items, languageOptions) {
+    if (!Array.isArray(items) || items.length === 0) {
+        console.log('[TTS] 스크립트 항목이 없어 TTS를 생성하지 않습니다.');
+        return [];
+    }
+
+    const normalizedOptions = normalizeLanguageOptions(languageOptions);
+    const { targetLanguage } = normalizedOptions;
+    const ttsClient = ensureTextToSpeechClient();
+    const voiceConfig = TTS_VOICE_MAP[targetLanguage] || TTS_VOICE_MAP[DEFAULT_TTS_LANGUAGE];
+    const voiceSelection = {
+        languageCode: voiceConfig.languageCode,
+        name: voiceConfig.name
+    };
+    const audioConfig = {
+        audioEncoding: 'MP3',
+        speakingRate: TTS_SPEAKING_RATE
+    };
+    const segments = [];
+
+    for (let index = 0; index < items.length && index < MAX_TTS_SEGMENTS; index += 1) {
+        const item = items[index];
+        const originalText = (item.text ?? '').toString().trim();
+        if (!originalText) {
+            console.log('[TTS] 빈 텍스트 항목을 건너뜁니다.', { index });
+            continue;
+        }
+
+        const truncatedText =
+            originalText.length > MAX_TTS_TEXT_LENGTH
+                ? `${originalText.slice(0, MAX_TTS_TEXT_LENGTH)}…`
+                : originalText;
+
+        try {
+            console.log(
+                '[TTS] TTS 요청 시작',
+                JSON.stringify({ index, targetLanguage, languageCode: voiceSelection.languageCode, voice: voiceSelection.name })
+            );
+
+            const [response] = await ttsClient.synthesizeSpeech({
+                input: { text: truncatedText },
+                voice: voiceSelection,
+                audioConfig
+            });
+
+            const audioContent = response?.audioContent;
+            if (!audioContent) {
+                console.warn('[TTS] 응답에 오디오 데이터가 없습니다.', { index });
+                continue;
+            }
+
+            let audioContentBase64;
+            if (Buffer.isBuffer(audioContent)) {
+                audioContentBase64 = audioContent.toString('base64');
+            } else if (typeof audioContent === 'string') {
+                audioContentBase64 = audioContent;
+            } else {
+                audioContentBase64 = Buffer.from(audioContent).toString('base64');
+            }
+
+            segments.push({
+                start: item.start,
+                end: item.end,
+                startSeconds: item.startSeconds,
+                endSeconds: item.endSeconds,
+                text: originalText,
+                audioMimeType: 'audio/mpeg',
+                audioContent: audioContentBase64
+            });
+            console.log('[TTS] TTS 생성 완료', JSON.stringify({ index, mimeType: 'audio/mpeg' }));
+        } catch (error) {
+            console.error('[TTS] 생성 오류', {
+                index,
+                message: error?.message,
+                cause: error?.cause
+            });
+        }
+    }
+
+    if (segments.length === 0) {
+        console.warn('[TTS] 생성된 오디오 세그먼트가 없습니다.');
+    }
+
+    return segments;
 }
 
 function buildStreamHeaders(remoteUrl, sourceUrl) {
@@ -223,16 +529,13 @@ app.post('/api/upload', (req, res) => {
 // 영상 정보 가져오기 및 다운로드 API (통합)
 app.post('/api/download', async (req, res) => {
     try {
-        const { url, audioOption } = req.body;
+        const { url } = req.body;
         
         if (!url) {
             return res.status(400).json({ error: '링크를 입력해주세요.' });
         }
 
         console.log('다운로드 요청 URL:', url);
-        if (audioOption) {
-            console.log('오디오 옵션:', audioOption);
-        }
 
         // URL 유효성 검사
         const isInstagramReel = url.includes('instagram.com') && url.includes('/reel');
@@ -380,12 +683,13 @@ app.post('/api/transcribe', async (req, res) => {
     let shouldCleanup = false;
 
     try {
-        const { transcriptSource } = req.body || {};
+        const { transcriptSource, languageOptions } = req.body || {};
 
         if (!transcriptSource || !transcriptSource.type) {
             return res.status(400).json({ error: '스크립트를 생성할 영상 정보가 필요합니다.' });
         }
 
+        const normalizedLanguageOptions = normalizeLanguageOptions(languageOptions);
         const model = ensureGeminiModel();
         let mimeType = transcriptSource.mimeType || 'video/mp4';
 
@@ -433,7 +737,7 @@ app.post('/api/transcribe', async (req, res) => {
                 }
             },
             {
-                text: buildTranscriptPrompt()
+                text: buildTranscriptPrompt(normalizedLanguageOptions)
             }
         ]);
 
@@ -441,11 +745,59 @@ app.post('/api/transcribe', async (req, res) => {
         const transcriptText = response && typeof response.text === 'function' ? response.text() : null;
 
         if (!transcriptText) {
+            console.warn('[Transcribe] Gemini 응답에 스크립트 텍스트가 없습니다.');
             throw new Error('모델이 스크립트를 생성하지 못했습니다.');
         }
 
+        console.log(
+            '[Transcribe] Gemini 스크립트 생성 완료',
+            JSON.stringify({
+                source: transcriptSource.type,
+                mimeType,
+                transcriptLength: transcriptText.length,
+                languageOptions: normalizedLanguageOptions
+            })
+        );
+
+        const sanitizedTranscriptText = extractJsonArrayFromText(transcriptText);
+        let parsedTranscriptItems = [];
+        try {
+            parsedTranscriptItems = JSON.parse(sanitizedTranscriptText);
+        } catch (parseError) {
+            console.warn('스크립트 JSON 파싱 실패:', parseError?.message || parseError);
+        }
+
+        const normalizedTranscriptItems = normalizeTranscriptItems(parsedTranscriptItems);
+        console.log(
+            '[Transcribe] 정규화된 스크립트 항목',
+            JSON.stringify({
+                totalParsed: Array.isArray(parsedTranscriptItems) ? parsedTranscriptItems.length : null,
+                normalizedCount: normalizedTranscriptItems.length
+            })
+        );
+
+        let ttsSegments = [];
+
+        if (normalizedTranscriptItems.length > 0) {
+            ttsSegments = await synthesizeTtsSegments(normalizedTranscriptItems, normalizedLanguageOptions);
+        }
+
+        console.log(
+            '[Transcribe] TTS 생성 결과',
+            JSON.stringify({
+                segmentsRequested: normalizedTranscriptItems.length,
+                segmentsGenerated: ttsSegments.length
+            })
+        );
+
         res.json({
-            transcript: transcriptText
+            transcript: transcriptText,
+            languageOptions: normalizedLanguageOptions,
+            items: normalizedTranscriptItems,
+            ttsSegments,
+            ttsConfig: {
+                speakingRate: TTS_SPEAKING_RATE
+            }
         });
     } catch (error) {
         console.error('스크립트 생성 오류:', error);
